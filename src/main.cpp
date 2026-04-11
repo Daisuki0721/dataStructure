@@ -12,7 +12,7 @@ using namespace std;
 
 int main() {
     //读取图像
-    Mat src = imread("../fruits.jpg"); 
+    Mat src = imread("../assets/fruits.jpg"); 
     if (src.empty()) {
         cout << "错误：无法读取 fruits.jpg，请检查文件路径！" << endl;
         return -1;
@@ -73,7 +73,7 @@ int main() {
     //显示最终合成结果
     imshow("Task 1: Seed & Watershed Result", result);
     
-    cout << "按下任意键退出程序..." << endl;
+    cout << "按任意键退出程序..." << endl;
     waitKey(0);
     destroyAllWindows();
 
