@@ -228,15 +228,11 @@ void ImageGUI::startSegmentation()
             circle(markers, seedPoints[i], 1, Scalar(static_cast<int>(i + 1)), -1);
         }
 
-        // 预处理：均值漂移滤波
-        Mat shifted;
-        pyrMeanShiftFiltering(original_image, shifted, 10, 51);
-
         status_label->setText("执行分水岭算法");
         qApp->processEvents();
 
         // 分水岭
-        watershed(shifted, markers);
+        watershed(original_image, markers);
 
         auto end_time = chrono::high_resolution_clock::now();
         chrono::duration<double, milli> duration = end_time - start_time;
