@@ -258,6 +258,9 @@ void ImageGUI::startSegmentation()
                 int index = markers.at<int>(i, j);
                 if (index > 0 && index <= k_value) {
                     colorMask.at<Vec3b>(i, j) = colors[index - 1];
+                } else if (index == -1) {
+                    // 分水岭边界显式着色，避免视觉上出现“空线”
+                    colorMask.at<Vec3b>(i, j) = Vec3b(255, 255, 255);
                 }
             }
         }
@@ -316,12 +319,14 @@ void ImageGUI::displayImage(const Mat &cv_img, QLabel *label)
     Mat rgb_image;
     cvtColor(display_img, rgb_image, COLOR_BGR2RGB);
 
-    // 转换为QImage
-    QImage qt_image(rgb_image.cols, rgb_image.rows, QImage::Format_RGB888);
-    std::memcpy(qt_image.bits(), rgb_image.data, 
-                rgb_image.total() * rgb_image.channels());
+    // 按 OpenCV 行步长构建 QImage，并 copy() 一份独立内存，避免显示空行/条纹
+    QImage qt_image(rgb_image.data,
+                    rgb_image.cols,
+                    rgb_image.rows,
+                    static_cast<int>(rgb_image.step),
+                    QImage::Format_RGB888);
 
-    label->setPixmap(QPixmap::fromImage(qt_image));
+    label->setPixmap(QPixmap::fromImage(qt_image.copy()));
 }
 
 void ImageGUI::saveResult()

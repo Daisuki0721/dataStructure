@@ -16,7 +16,7 @@ public:
         return std::sqrt(static_cast<double>(width * height) / k);
     }
 
-    // PDS(泊松圆盘) + FPS(最远点采样)：更接近六边形均匀分布的受限随机采样
+    // 多相位六角晶格 + FPS：在严格距离约束下尽量逼近最密均匀分布
     static std::vector<cv::Point> generateSeeds(int width, int height, int k) {
         std::vector<cv::Point> seeds;
 
@@ -29,38 +29,31 @@ public:
         seeds.reserve(static_cast<size_t>(target));
 
         std::mt19937 rng(static_cast<unsigned int>(std::time(nullptr)));
-        std::uniform_real_distribution<double> unit(0.0, 1.0);
         std::uniform_int_distribution<int> xDist(0, width - 1);
         std::uniform_int_distribution<int> yDist(0, height - 1);
 
         const double minDist = std::max(1.0, calculateMinDistance(width, height, std::max(1, target)));
         const double minDistSq = minDist * minDist;
 
-        // Bridson 常用设置：cellSize = r / sqrt(2)
+        // 用于严格距离验证的空间哈希桶。
         const int cellSize = std::max(1, static_cast<int>(std::floor(minDist / std::sqrt(2.0))));
         const int gridW = (width + cellSize - 1) / cellSize;
         const int gridH = (height + cellSize - 1) / cellSize;
 
-        auto toCellIndex = [&](const cv::Point& p) {
+        auto toCell = [&](const cv::Point& p) {
             int cx = std::min(gridW - 1, std::max(0, p.x / cellSize));
             int cy = std::min(gridH - 1, std::max(0, p.y / cellSize));
-            return cy * gridW + cx;
+            return std::pair<int, int>(cx, cy);
         };
 
         auto farEnough = [&](const cv::Point& p,
                              const std::vector<cv::Point>& points,
                              const std::vector<std::vector<int>>& buckets) -> bool {
-            int cx = std::min(gridW - 1, std::max(0, p.x / cellSize));
-            int cy = std::min(gridH - 1, std::max(0, p.y / cellSize));
+            auto [cx, cy] = toCell(p);
             int neighborRange = static_cast<int>(std::ceil(minDist / cellSize));
 
-            int minY = std::max(0, cy - neighborRange);
-            int maxY = std::min(gridH - 1, cy + neighborRange);
-            int minX = std::max(0, cx - neighborRange);
-            int maxX = std::min(gridW - 1, cx + neighborRange);
-
-            for (int yy = minY; yy <= maxY; ++yy) {
-                for (int xx = minX; xx <= maxX; ++xx) {
+            for (int yy = std::max(0, cy - neighborRange); yy <= std::min(gridH - 1, cy + neighborRange); ++yy) {
+                for (int xx = std::max(0, cx - neighborRange); xx <= std::min(gridW - 1, cx + neighborRange); ++xx) {
                     const auto& cell = buckets[static_cast<size_t>(yy * gridW + xx)];
                     for (int idx : cell) {
                         const cv::Point& q = points[static_cast<size_t>(idx)];
@@ -76,76 +69,97 @@ public:
             return true;
         };
 
-        // 1) PDS 生成蓝噪声候选集（受限随机，天然趋向蜂窝/六边形稳定态）
-        std::vector<cv::Point> candidates;
-        candidates.reserve(static_cast<size_t>(std::max(target * 2, target + 64)));
-        std::vector<std::vector<int>> buckets(static_cast<size_t>(gridW * gridH));
-        std::vector<int> active;
+        auto buildHexCandidatesForPhase = [&](double ox, double oy) {
+            std::vector<cv::Point> points;
+            std::vector<std::vector<int>> buckets(static_cast<size_t>(gridW * gridH));
+            std::vector<unsigned char> used(static_cast<size_t>(totalPixels), 0);
 
-        auto addCandidate = [&](const cv::Point& p) {
-            int idx = static_cast<int>(candidates.size());
-            candidates.push_back(p);
-            buckets[static_cast<size_t>(toCellIndex(p))].push_back(idx);
-            active.push_back(idx);
-        };
+            const double dx = std::floor(minDist) + 1.0;
+            const double dy = dx * std::sqrt(3.0) * 0.5;
 
-        addCandidate(cv::Point(xDist(rng), yDist(rng)));
+            int row = 0;
+            for (double yf = oy; yf < height; yf += dy, ++row) {
+                double xStart = ox + ((row & 1) ? dx * 0.5 : 0.0);
+                for (double xf = xStart; xf < width; xf += dx) {
+                    int x = static_cast<int>(std::round(xf));
+                    int y = static_cast<int>(std::round(yf));
+                    if (x < 0 || x >= width || y < 0 || y >= height) {
+                        continue;
+                    }
 
-        const int kTrials = 30;
-        const int candidateCap = std::max(target * 3, target + 128);
+                    int idxPixel = y * width + x;
+                    if (used[static_cast<size_t>(idxPixel)]) {
+                        continue;
+                    }
 
-        while (!active.empty() && static_cast<int>(candidates.size()) < candidateCap) {
-            std::uniform_int_distribution<int> activeDist(0, static_cast<int>(active.size()) - 1);
-            int activePos = activeDist(rng);
-            int baseIdx = active[static_cast<size_t>(activePos)];
-            cv::Point base = candidates[static_cast<size_t>(baseIdx)];
+                    cv::Point p(x, y);
+                    if (!farEnough(p, points, buckets)) {
+                        continue;
+                    }
 
-            bool found = false;
-            for (int t = 0; t < kTrials && static_cast<int>(candidates.size()) < candidateCap; ++t) {
-                double angle = 2.0 * CV_PI * unit(rng);
-                // 在 [r, 2r] 环带内采样
-                double radius = minDist * (1.0 + unit(rng));
-                int nx = static_cast<int>(std::round(base.x + radius * std::cos(angle)));
-                int ny = static_cast<int>(std::round(base.y + radius * std::sin(angle)));
-
-                if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-                    continue;
+                    int idx = static_cast<int>(points.size());
+                    points.push_back(p);
+                    used[static_cast<size_t>(idxPixel)] = 1;
+                    auto [cx, cy] = toCell(p);
+                    buckets[static_cast<size_t>(cy * gridW + cx)].push_back(idx);
                 }
-
-                cv::Point p(nx, ny);
-                if (!farEnough(p, candidates, buckets)) {
-                    continue;
-                }
-
-                addCandidate(p);
-                found = true;
-                break;
             }
 
-            if (!found) {
-                active[static_cast<size_t>(activePos)] = active.back();
-                active.pop_back();
+            return points;
+        };
+
+        // 1) 多相位搜索最佳六角晶格偏移，尽量提高可行点上限。
+        std::vector<cv::Point> candidates;
+        const double dx = std::floor(minDist) + 1.0;
+        const double dy = dx * std::sqrt(3.0) * 0.5;
+        const int phaseSteps = 8;
+        for (int py = 0; py < phaseSteps; ++py) {
+            for (int px = 0; px < phaseSteps; ++px) {
+                double ox = (static_cast<double>(px) / phaseSteps) * dx;
+                double oy = (static_cast<double>(py) / phaseSteps) * dy;
+                auto phasePoints = buildHexCandidatesForPhase(ox, oy);
+                if (phasePoints.size() > candidates.size()) {
+                    candidates.swap(phasePoints);
+                }
             }
         }
 
-        // 2) 若候选仍不足，再做严格距离的随机补点（不放宽阈值）
-        int fallbackAttempts = 0;
-        int fallbackLimit = std::max(2000, target * 80);
-        while (static_cast<int>(candidates.size()) < target && fallbackAttempts < fallbackLimit) {
-            cv::Point p(xDist(rng), yDist(rng));
-            if (farEnough(p, candidates, buckets)) {
-                int idx = static_cast<int>(candidates.size());
-                candidates.push_back(p);
-                buckets[static_cast<size_t>(toCellIndex(p))].push_back(idx);
+        // 2) 极端情况下仍不足时，做严格随机补点（不放宽阈值）。
+        if (static_cast<int>(candidates.size()) < target) {
+            std::vector<std::vector<int>> buckets(static_cast<size_t>(gridW * gridH));
+            std::vector<unsigned char> used(static_cast<size_t>(totalPixels), 0);
+            for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+                auto [cx, cy] = toCell(candidates[static_cast<size_t>(i)]);
+                buckets[static_cast<size_t>(cy * gridW + cx)].push_back(i);
+                int idxPixel = candidates[static_cast<size_t>(i)].y * width + candidates[static_cast<size_t>(i)].x;
+                used[static_cast<size_t>(idxPixel)] = 1;
             }
-            ++fallbackAttempts;
+
+            int attempts = 0;
+            int limit = std::max(5000, target * 100);
+            while (static_cast<int>(candidates.size()) < target && attempts < limit) {
+                cv::Point p(xDist(rng), yDist(rng));
+                int idxPixel = p.y * width + p.x;
+                if (used[static_cast<size_t>(idxPixel)]) {
+                    ++attempts;
+                    continue;
+                }
+                if (farEnough(p, candidates, buckets)) {
+                    int idx = static_cast<int>(candidates.size());
+                    candidates.push_back(p);
+                    used[static_cast<size_t>(idxPixel)] = 1;
+                    auto [cx, cy] = toCell(p);
+                    buckets[static_cast<size_t>(cy * gridW + cx)].push_back(idx);
+                }
+                ++attempts;
+            }
         }
 
         if (candidates.empty()) {
             return seeds;
         }
 
-        // 3) 如果候选数>=K，使用 FPS 选 K 个，增强全局均匀性
+        // 3) 候选过多时，用 FPS 选出 K 个，保持全局均匀。
         if (static_cast<int>(candidates.size()) > target) {
             std::vector<double> bestDistSq(candidates.size(), std::numeric_limits<double>::max());
             std::vector<unsigned char> chosen(candidates.size(), 0);
@@ -156,40 +170,38 @@ public:
             seeds.push_back(candidates[static_cast<size_t>(first)]);
 
             for (size_t i = 0; i < candidates.size(); ++i) {
-                double dx = static_cast<double>(candidates[i].x - candidates[static_cast<size_t>(first)].x);
-                double dy = static_cast<double>(candidates[i].y - candidates[static_cast<size_t>(first)].y);
-                bestDistSq[i] = dx * dx + dy * dy;
+                double dx0 = static_cast<double>(candidates[i].x - candidates[static_cast<size_t>(first)].x);
+                double dy0 = static_cast<double>(candidates[i].y - candidates[static_cast<size_t>(first)].y);
+                bestDistSq[i] = dx0 * dx0 + dy0 * dy0;
             }
 
             while (static_cast<int>(seeds.size()) < target) {
                 int pick = -1;
-                double maxMinDist = -1.0;
-
+                double score = -1.0;
                 for (size_t i = 0; i < candidates.size(); ++i) {
                     if (chosen[i]) {
                         continue;
                     }
-                    if (bestDistSq[i] > maxMinDist) {
-                        maxMinDist = bestDistSq[i];
+                    if (bestDistSq[i] > score) {
+                        score = bestDistSq[i];
                         pick = static_cast<int>(i);
                     }
                 }
-
                 if (pick < 0) {
                     break;
                 }
 
                 chosen[static_cast<size_t>(pick)] = 1;
-                const cv::Point pickedPoint = candidates[static_cast<size_t>(pick)];
-                seeds.push_back(pickedPoint);
+                const cv::Point chosenPoint = candidates[static_cast<size_t>(pick)];
+                seeds.push_back(chosenPoint);
 
                 for (size_t i = 0; i < candidates.size(); ++i) {
                     if (chosen[i]) {
                         continue;
                     }
-                    double dx = static_cast<double>(candidates[i].x - pickedPoint.x);
-                    double dy = static_cast<double>(candidates[i].y - pickedPoint.y);
-                    double d2 = dx * dx + dy * dy;
+                    double dxi = static_cast<double>(candidates[i].x - chosenPoint.x);
+                    double dyi = static_cast<double>(candidates[i].y - chosenPoint.y);
+                    double d2 = dxi * dxi + dyi * dyi;
                     if (d2 < bestDistSq[i]) {
                         bestDistSq[i] = d2;
                     }
@@ -199,7 +211,6 @@ public:
             return seeds;
         }
 
-        // 候选数不足K时，返回全部严格合法点（全部互异且满足距离阈值）
         return candidates;
     }
 };
