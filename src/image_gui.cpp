@@ -8,6 +8,9 @@
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QTabWidget>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QHeaderView>
 #include <QPixmap>
 #include <QImage>
 #include <QApplication>
@@ -20,7 +23,7 @@ using namespace cv;
 using namespace std;
 
 ImageGUI::ImageGUI(QWidget *parent)
-    : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr)
+    : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr), seed_table(nullptr)
 {
     initUI();
 }
@@ -42,6 +45,9 @@ void ImageGUI::initUI()
     // 控制面板
     QWidget *control_panel = createControlPanel();
     main_layout->addWidget(control_panel);
+
+    // 中部布局：左侧图像 + 右侧坐标侧栏
+    QHBoxLayout *content_layout = new QHBoxLayout();
 
     // Tab用于显示图像
     tab_widget = new QTabWidget();
@@ -70,7 +76,38 @@ void ImageGUI::initUI()
         result_scroll->setWidgetResizable(true);
     tab_widget->addTab(result_scroll, "分割结果");
 
-    main_layout->addWidget(tab_widget);
+    content_layout->addWidget(tab_widget, 1);
+
+    // 右侧栏：种子点编号与坐标表
+    QWidget *sidebar = new QWidget();
+    sidebar->setMinimumWidth(260);
+    sidebar->setMaximumWidth(360);
+    QVBoxLayout *sidebar_layout = new QVBoxLayout(sidebar);
+
+    QLabel *sidebar_title = new QLabel("种子点坐标表");
+    sidebar_title->setStyleSheet("font-weight: bold; color: #333; padding: 4px 0;");
+    sidebar_layout->addWidget(sidebar_title);
+
+    seed_table = new QTableWidget();
+    seed_table->setColumnCount(2);
+    seed_table->setHorizontalHeaderLabels(QStringList() << "编号" << "坐标");
+    seed_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    seed_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    seed_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    seed_table->setAlternatingRowColors(true);
+    seed_table->verticalHeader()->setVisible(false);
+    seed_table->horizontalHeader()->setStretchLastSection(true);
+    seed_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    seed_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    seed_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    seed_table->setMinimumHeight(420);
+        connect(seed_table, &QTableWidget::cellClicked,
+            this, &ImageGUI::onSeedTableCellClicked);
+    sidebar_layout->addWidget(seed_table, 1);
+
+    content_layout->addWidget(sidebar);
+
+    main_layout->addLayout(content_layout, 1);
 
     // 状态信息
     status_label = new QLabel("准备就绪");
@@ -176,6 +213,7 @@ void ImageGUI::selectImage()
         if (!original_image.empty()) {
             displayImage(original_image, original_label);
             tab_widget->setCurrentIndex(0);
+            updateSeedTable(vector<Point>());
             string status = "已加载图像: " + to_string(original_image.cols) + "x" +
                           to_string(original_image.rows);
             status_label->setText(QString::fromStdString(status));
@@ -266,10 +304,23 @@ void ImageGUI::startSegmentation()
         addWeighted(original_image, 0.6, colorMask, 0.4, 0, result);
 
         // 绘制种子点
-        for (const auto &pt : seedPoints) {
+        for (size_t i = 0; i < seedPoints.size(); ++i) {
+            const auto &pt = seedPoints[i];
             circle(result, pt, 3, Scalar(0, 0, 255), -1);
             circle(result, pt, 3, Scalar(255, 255, 255), 1);
+
+            // 在点旁边标注编号，便于与右侧表格对应
+            putText(result,
+                    to_string(static_cast<int>(i + 1)),
+                    Point(pt.x + 5, pt.y - 5),
+                    FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    Scalar(255, 255, 255),
+                    1,
+                    LINE_AA);
         }
+
+        updateSeedTable(seedPoints);
 
         // 添加时间信息
         string timeText = "Time: " + to_string(duration.count()) + " ms";
@@ -346,4 +397,55 @@ void ImageGUI::saveResult()
             QMessageBox::critical(this, "错误", "保存失败");
         }
     }
+}
+
+void ImageGUI::updateSeedTable(const vector<Point> &seedPoints)
+{
+    if (!seed_table) {
+        return;
+    }
+
+    current_seed_points = seedPoints;
+
+    seed_table->setRowCount(static_cast<int>(seedPoints.size()));
+    for (int i = 0; i < static_cast<int>(seedPoints.size()); ++i) {
+        QTableWidgetItem *id_item = new QTableWidgetItem(QString::number(i + 1));
+        id_item->setTextAlignment(Qt::AlignCenter);
+        seed_table->setItem(i, 0, id_item);
+
+        const Point &p = seedPoints[i];
+        QTableWidgetItem *coord_item = new QTableWidgetItem(
+            QString("(%1,%2)").arg(p.x).arg(p.y));
+        coord_item->setTextAlignment(Qt::AlignCenter);
+        seed_table->setItem(i, 1, coord_item);
+    }
+
+    seed_table->clearSelection();
+}
+
+void ImageGUI::onSeedTableCellClicked(int row, int column)
+{
+    (void)column;
+
+    if (result_image.empty()) {
+        return;
+    }
+    if (row < 0 || row >= static_cast<int>(current_seed_points.size())) {
+        return;
+    }
+
+    Mat highlighted = result_image.clone();
+    const Point &pt = current_seed_points[row];
+
+    // 高亮当前选择点，不修改可保存的原始 result_image。
+    circle(highlighted, pt, 10, Scalar(0, 255, 255), 2);
+    circle(highlighted, pt, 4, Scalar(0, 255, 255), -1);
+
+    const string selectText = "Selected #" + to_string(row + 1) +
+                              " (" + to_string(pt.x) + "," + to_string(pt.y) + ")";
+    putText(highlighted, selectText, Point(20, 75), FONT_HERSHEY_SIMPLEX,
+            0.6, Scalar(0, 255, 255), 2, LINE_AA);
+
+    displayImage(highlighted, result_label);
+    tab_widget->setCurrentIndex(1);
 }

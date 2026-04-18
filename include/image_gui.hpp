@@ -7,8 +7,10 @@
 #include <QSpinBox>
 #include <opencv2/opencv.hpp>
 #include <string>
+#include <vector>
 
 class QTabWidget;
+class QTableWidget;
 
 class ImageGUI : public QMainWindow
 {
@@ -23,11 +25,13 @@ private slots:
     void onKValueChanged(int value);
     void startSegmentation();
     void saveResult();
+    void onSeedTableCellClicked(int row, int column);
 
 private:
     void initUI();
     QWidget *createControlPanel();
     void displayImage(const cv::Mat &cv_img, QLabel *label);
+    void updateSeedTable(const std::vector<cv::Point> &seedPoints);
 
     QLabel *original_label;
     QLabel *result_label;
@@ -38,9 +42,11 @@ private:
     QPushButton *save_button;
     QSpinBox *k_spinbox;
     QTabWidget *tab_widget;
+    QTableWidget *seed_table;
 
     cv::Mat original_image;
     cv::Mat result_image;
+    std::vector<cv::Point> current_seed_points;
     std::string image_path;
     int k_value;
 };
