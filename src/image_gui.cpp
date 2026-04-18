@@ -8,10 +8,12 @@
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QHeaderView>
 #include <QAbstractItemView>
+#include <QStackedWidget>
 #include <QPixmap>
 #include <QImage>
 #include <QApplication>
@@ -27,7 +29,9 @@ using namespace cv;
 using namespace std;
 
 ImageGUI::ImageGUI(QWidget *parent)
-    : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr), info_table(nullptr)
+    : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr),
+      sidebar_widget(nullptr), sidebar_stack(nullptr), seed_table(nullptr), info_table(nullptr),
+      sidebar_title_label(nullptr), view_mode_combo(nullptr)
 {
     initUI();
 }
@@ -92,36 +96,61 @@ void ImageGUI::initUI()
     coloring_scroll->setWidgetResizable(true);
     tab_widget->addTab(coloring_scroll, "着色结果");
 
+    // 隐藏原有页签栏，改用固定下拉框切换观察模式。
+    tab_widget->tabBar()->hide();
+    connect(tab_widget, &QTabWidget::currentChanged, this, &ImageGUI::onTabChanged);
+
     content_layout->addWidget(tab_widget, 1);
 
-    // 右侧栏：种子点编号与坐标表
-    QWidget *sidebar = new QWidget();
-    sidebar->setMinimumWidth(260);
-    sidebar->setMaximumWidth(360);
-    QVBoxLayout *sidebar_layout = new QVBoxLayout(sidebar);
+    // 右侧栏：按页签切换“采样点坐标”与“着色信息”
+    sidebar_widget = new QWidget();
+    sidebar_widget->setMinimumWidth(260);
+    sidebar_widget->setMaximumWidth(360);
+    QVBoxLayout *sidebar_layout = new QVBoxLayout(sidebar_widget);
 
-        QLabel *sidebar_title = new QLabel("区域信息");
-    sidebar_title->setStyleSheet("font-weight: bold; color: #333; padding: 4px 0;");
-    sidebar_layout->addWidget(sidebar_title);
+    sidebar_title_label = new QLabel("采样点坐标");
+    sidebar_title_label->setStyleSheet("font-weight: bold; color: #333; padding: 4px 0;");
+    sidebar_layout->addWidget(sidebar_title_label);
 
-        info_table = new QTableWidget();
-        info_table->setColumnCount(3);
-        info_table->setHorizontalHeaderLabels(QStringList() << "区域" << "颜色" << "邻居数");
-        info_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        info_table->setSelectionBehavior(QAbstractItemView::SelectRows);
-        info_table->setSelectionMode(QAbstractItemView::SingleSelection);
-        info_table->setAlternatingRowColors(true);
-        info_table->verticalHeader()->setVisible(false);
-        info_table->horizontalHeader()->setStretchLastSection(true);
-        info_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        info_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        info_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        info_table->setMinimumHeight(420);
-        connect(info_table, &QTableWidget::cellClicked,
+    sidebar_stack = new QStackedWidget();
+
+    seed_table = new QTableWidget();
+    seed_table->setColumnCount(2);
+    seed_table->setHorizontalHeaderLabels(QStringList() << "编号" << "坐标");
+    seed_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    seed_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    seed_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    seed_table->setAlternatingRowColors(true);
+    seed_table->verticalHeader()->setVisible(false);
+    seed_table->horizontalHeader()->setStretchLastSection(true);
+    seed_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    seed_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    seed_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    seed_table->setMinimumHeight(420);
+        connect(seed_table, &QTableWidget::cellClicked,
+            this, &ImageGUI::onSeedTableCellClicked);
+    sidebar_stack->addWidget(seed_table);
+
+    info_table = new QTableWidget();
+    info_table->setColumnCount(3);
+    info_table->setHorizontalHeaderLabels(QStringList() << "区域" << "颜色" << "邻居数");
+    info_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    info_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    info_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    info_table->setAlternatingRowColors(true);
+    info_table->verticalHeader()->setVisible(false);
+    info_table->horizontalHeader()->setStretchLastSection(true);
+    info_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    info_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    info_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    info_table->setMinimumHeight(420);
+    connect(info_table, &QTableWidget::cellClicked,
             this, &ImageGUI::onInfoTableCellClicked);
-        sidebar_layout->addWidget(info_table, 1);
+    sidebar_stack->addWidget(info_table);
 
-    content_layout->addWidget(sidebar);
+    sidebar_layout->addWidget(sidebar_stack, 1);
+
+    content_layout->addWidget(sidebar_widget);
 
     main_layout->addLayout(content_layout, 1);
 
@@ -131,6 +160,9 @@ void ImageGUI::initUI()
     main_layout->addWidget(status_label);
 
     show();
+
+    // 初始为原图页：隐藏侧栏。
+    syncSidebarByTab(0);
 }
 
 QWidget *ImageGUI::createControlPanel()
@@ -149,6 +181,20 @@ QWidget *ImageGUI::createControlPanel()
     layout->addWidget(file_label);
 
     layout->addSpacing(20);
+
+        // 观察模式下拉菜单（固定位置）
+        layout->addWidget(new QLabel("观察模式:"));
+        view_mode_combo = new QComboBox();
+        view_mode_combo->addItem("原始图像");
+        view_mode_combo->addItem("分割结果");
+        view_mode_combo->addItem("着色结果");
+        view_mode_combo->setCurrentIndex(0);
+        view_mode_combo->setMinimumWidth(180);
+        connect(view_mode_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &ImageGUI::onViewModeChanged);
+        layout->addWidget(view_mode_combo);
+
+        layout->addSpacing(20);
 
     // K值输入
     layout->addWidget(new QLabel("K值 (种子数):"));
@@ -183,7 +229,7 @@ QWidget *ImageGUI::createControlPanel()
     layout->addWidget(segment_button);
 
     // Task2 按钮
-    task2_button = new QPushButton("Task2重着色");
+    task2_button = new QPushButton("重着色");
     connect(task2_button, &QPushButton::clicked, this, &ImageGUI::startTask2Recolor);
     task2_button->setStyleSheet(
         "QPushButton {"
@@ -251,6 +297,9 @@ void ImageGUI::selectImage()
             tab_widget->setCurrentIndex(0);
             updateSeedTable(vector<Point>());
             updateRegionInfoTable({}, {}, {});
+            task1_cached_image.release();
+            task1_display_image.release();
+            task2_display_image.release();
             task2_base_image.release();
             task2_markers.release();
             task2_region_labels.clear();
@@ -371,6 +420,8 @@ void ImageGUI::startSegmentation()
                 Scalar(0, 255, 0), 2);
 
         result_image = result;
+        task1_cached_image = result.clone();
+        task1_display_image = task1_cached_image.clone();
         displayImage(result, result_label);
         tab_widget->setCurrentIndex(1);
 
@@ -393,6 +444,35 @@ void ImageGUI::startSegmentation()
     task2_button->setEnabled(true);
     file_button->setEnabled(true);
     k_spinbox->setEnabled(true);
+}
+
+void ImageGUI::onSeedTableCellClicked(int row, int column)
+{
+    (void)column;
+
+    if (task1_cached_image.empty()) {
+        return;
+    }
+    if (row < 0 || row >= static_cast<int>(current_seed_points.size())) {
+        return;
+    }
+
+    Mat highlighted = task1_cached_image.clone();
+    const Point &pt = current_seed_points[row];
+
+    circle(highlighted, pt, 10, Scalar(0, 255, 255), 2);
+    circle(highlighted, pt, 4, Scalar(0, 255, 255), -1);
+
+    const string info = "Point #" + to_string(row + 1) +
+                        " (" + to_string(pt.x) + "," + to_string(pt.y) + ")";
+    putText(highlighted, info, Point(20, 75), FONT_HERSHEY_SIMPLEX,
+            0.6, Scalar(0, 255, 255), 2, LINE_AA);
+
+    task1_display_image = highlighted;
+    result_image = task1_display_image;
+    displayImage(task1_display_image, result_label);
+    tab_widget->setCurrentIndex(1);
+    status_label->setText(QString::fromStdString("已选中 " + info));
 }
 
 void ImageGUI::startTask2Recolor()
@@ -505,19 +585,20 @@ void ImageGUI::startTask2Recolor()
         auto end_time = chrono::high_resolution_clock::now();
         chrono::duration<double, milli> duration = end_time - start_time;
 
-        string infoText = "Task2 Time: " + to_string(duration.count()) + " ms";
+        string infoText = "Time: " + to_string(duration.count()) + " ms";
         putText(result, infoText, Point(20, 40), FONT_HERSHEY_SIMPLEX, 0.7,
                 Scalar(0, 255, 255), 2);
 
         // Task2 保存基础结果与图结构信息，用于侧栏点击高亮。
         task2_base_image = result;
+        task2_display_image = task2_base_image.clone();
         task2_markers = markers.clone();
         task2_region_labels = regionLabels;
         task2_node_colors = nodeColors;
         task2_adjacency = adjacency;
 
-        result_image = task2_base_image;
-        displayImage(task2_base_image, coloring_label);
+        result_image = task2_display_image;
+        displayImage(task2_display_image, coloring_label);
         updateRegionInfoTable(task2_region_labels, task2_node_colors, task2_adjacency);
         tab_widget->setCurrentIndex(2);
 
@@ -594,8 +675,26 @@ void ImageGUI::saveResult()
 
 void ImageGUI::updateSeedTable(const vector<Point> &seedPoints)
 {
-    // Task1 仍保留点缓存，但侧栏不再显示坐标表。
     current_seed_points = seedPoints;
+
+    if (!seed_table) {
+        return;
+    }
+
+    seed_table->clearContents();
+    seed_table->setRowCount(static_cast<int>(seedPoints.size()));
+    for (int i = 0; i < static_cast<int>(seedPoints.size()); ++i) {
+        QTableWidgetItem *id_item = new QTableWidgetItem(QString::number(i + 1));
+        id_item->setTextAlignment(Qt::AlignCenter);
+        seed_table->setItem(i, 0, id_item);
+
+        const Point &p = seedPoints[i];
+        QTableWidgetItem *coord_item = new QTableWidgetItem(QString("(%1,%2)").arg(p.x).arg(p.y));
+        coord_item->setTextAlignment(Qt::AlignCenter);
+        seed_table->setItem(i, 1, coord_item);
+    }
+
+    seed_table->clearSelection();
 }
 
 void ImageGUI::updateRegionInfoTable(const vector<int> &regionLabels,
@@ -703,7 +802,70 @@ void ImageGUI::onInfoTableCellClicked(int row, int column)
     putText(highlighted, info, Point(20, 75), FONT_HERSHEY_SIMPLEX,
             0.6, Scalar(0, 255, 255), 2, LINE_AA);
 
+    task2_display_image = highlighted;
+    result_image = task2_display_image;
     displayImage(highlighted, coloring_label);
     tab_widget->setCurrentIndex(2);
     status_label->setText(QString::fromStdString("Selected " + info));
+}
+
+void ImageGUI::onTabChanged(int index)
+{
+    if (view_mode_combo && view_mode_combo->currentIndex() != index) {
+        view_mode_combo->blockSignals(true);
+        view_mode_combo->setCurrentIndex(index);
+        view_mode_combo->blockSignals(false);
+    }
+
+    syncSidebarByTab(index);
+
+    if (index == 1) {
+        if (!task1_display_image.empty()) {
+            displayImage(task1_display_image, result_label);
+            result_image = task1_display_image;
+        } else if (!task1_cached_image.empty()) {
+            displayImage(task1_cached_image, result_label);
+            result_image = task1_cached_image;
+        }
+    } else if (index == 2) {
+        if (!task2_display_image.empty()) {
+            displayImage(task2_display_image, coloring_label);
+            result_image = task2_display_image;
+        } else if (!task2_base_image.empty()) {
+            displayImage(task2_base_image, coloring_label);
+            result_image = task2_base_image;
+        }
+    }
+}
+
+void ImageGUI::onViewModeChanged(int index)
+{
+    if (!tab_widget) {
+        return;
+    }
+    if (index < 0 || index >= tab_widget->count()) {
+        return;
+    }
+    tab_widget->setCurrentIndex(index);
+}
+
+void ImageGUI::syncSidebarByTab(int index)
+{
+    if (!sidebar_widget || !sidebar_stack || !sidebar_title_label) {
+        return;
+    }
+
+    if (index == 0) {
+        sidebar_widget->hide();
+        return;
+    }
+
+    sidebar_widget->show();
+    if (index == 1) {
+        sidebar_title_label->setText("采样点坐标");
+        sidebar_stack->setCurrentIndex(0);
+    } else {
+        sidebar_title_label->setText("区域着色信息");
+        sidebar_stack->setCurrentIndex(1);
+    }
 }
