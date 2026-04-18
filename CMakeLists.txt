@@ -31,11 +31,15 @@ file(GLOB HDRS "include/*.hpp")
 
 include_directories(include ${OpenCV_INCLUDE_DIRS})
 
-# 命令行版本（不需要 Qt）
+# 命令行版本
 add_executable(task src/main.cpp)
 target_link_libraries(task ${OpenCV_LIBS})
 
-# GUI 版本（需要 Qt 和 MOC）
+# 任务2命令行版本
+add_executable(task2 src/task2_main.cpp)
+target_link_libraries(task2 ${OpenCV_LIBS})
+
+# GUI 版本
 set(GUI_HEADERS include/image_gui.hpp)
 set(GUI_SOURCES src/main_gui.cpp src/image_gui.cpp)
 
