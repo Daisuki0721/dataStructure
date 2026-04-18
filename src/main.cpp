@@ -1,6 +1,8 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
+#include <fstream>
+#include <filesystem>
 #include "segmentation.hpp"
 #include <opencv2/opencv.hpp>
 
@@ -45,7 +47,8 @@ int main() {
     cout << "算法执行耗时: " << duration.count() << " 毫秒" << endl;
 
     vector<Vec3b> colors;
-    for (int i = 0; i < K; i++) {
+    const int seedCount = static_cast<int>(seedPoints.size());
+    for (int i = 0; i < seedCount; i++) {
         colors.push_back(Vec3b(rand() & 255, rand() & 255, rand() & 255));
     }
 
@@ -53,7 +56,7 @@ int main() {
     for (int i = 0; i < markers.rows; i++) {
         for (int j = 0; j < markers.cols; j++) {
             int index = markers.at<int>(i, j);
-            if (index > 0 && index <= K) {
+            if (index > 0 && index <= seedCount) {
                 colorMask.at<Vec3b>(i, j) = colors[index - 1];
             }
         }
@@ -62,9 +65,38 @@ int main() {
     Mat result;
     addWeighted(src, 0.6, colorMask, 0.4, 0, result);
 
-    for (const auto& pt : seedPoints) {
+    for (size_t i = 0; i < seedPoints.size(); ++i) {
+        const auto& pt = seedPoints[i];
         circle(result, pt, 3, Scalar(0, 0, 255), -1);
-        circle(result, pt, 3, Scalar(255, 255, 255), 1); 
+        circle(result, pt, 3, Scalar(255, 255, 255), 1);
+
+        // 在每个种子点旁显示编号（从 1 开始）
+        const string label = to_string(static_cast<int>(i + 1));
+        putText(result,
+                label,
+                Point(pt.x + 5, pt.y - 5),
+                FONT_HERSHEY_SIMPLEX,
+                0.45,
+                Scalar(255, 255, 255),
+                1,
+                LINE_AA);
+    }
+
+    // 导出编号与坐标 CSV 到 outputs 目录
+    const string outputDir = "../outputs";
+    const string csvPath = outputDir + "/task1_seed_points.csv";
+    std::filesystem::create_directories(outputDir);
+
+    std::ofstream csv(csvPath);
+    if (!csv.is_open()) {
+        cerr << "警告：无法写入 CSV 文件: " << csvPath << endl;
+    } else {
+        csv << "id,coord\n";
+        for (size_t i = 0; i < seedPoints.size(); ++i) {
+            csv << (i + 1) << ",\"(" << seedPoints[i].x << "," << seedPoints[i].y << ")\"\n";
+        }
+        csv.close();
+        cout << "已导出种子点 CSV: " << csvPath << endl;
     }
 
     string timeText = "Time: " + to_string(duration.count()) + " ms";
