@@ -40,6 +40,7 @@ private slots:
     void onHuffmanAreaViewClicked();
     void onHuffmanTreeViewClicked();
     void onHuffmanAreaTableCellClicked(int row, int column);
+    void onHuffmanCodeTableCellClicked(int row, int column);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -107,6 +108,7 @@ private:
     int huffman_last_low;
     int huffman_last_high;
     std::vector<cv::Point> huffman_tree_node_centers;
+    std::vector<int> huffman_tree_node_labels;
     std::vector<std::pair<int, int>> huffman_all_label_areas;
     std::set<int> huffman_matched_labels;
     std::vector<std::tuple<int, int, std::string>> huffman_code_rows;

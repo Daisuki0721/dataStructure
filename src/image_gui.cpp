@@ -248,7 +248,8 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
                      int y,
                      int xOffset,
                      int levelHeight,
-                     vector<Point> *nodeCenters)
+                     vector<Point> *nodeCenters,
+                     vector<int> *nodeLabels)
 {
     if (!root) {
         return;
@@ -270,7 +271,8 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
                         childY,
                         max(24, xOffset / 2),
                         levelHeight,
-                        nodeCenters);
+                        nodeCenters,
+                        nodeLabels);
     }
     if (root->right) {
         const int childX = x + xOffset;
@@ -284,11 +286,15 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
                         childY,
                         max(24, xOffset / 2),
                         levelHeight,
-                        nodeCenters);
+                        nodeCenters,
+                        nodeLabels);
     }
 
     if (nodeCenters) {
         nodeCenters->push_back(Point(x, y));
+    }
+    if (nodeLabels) {
+        nodeLabels->push_back(root->label);
     }
 
     circle(canvas, Point(x, y), 16, nodeColor, FILLED, LINE_AA);
@@ -404,9 +410,12 @@ void ImageGUI::initUI()
     huffman_tree_button->setCheckable(true);
     connect(huffman_tree_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanTreeViewClicked);
 
+    huffman_switch_layout->setSpacing(6);
     huffman_switch_layout->addWidget(huffman_area_button);
-    huffman_switch_layout->addWidget(huffman_view_title_label, 1);
     huffman_switch_layout->addWidget(huffman_tree_button);
+    huffman_switch_layout->addSpacing(10);
+    huffman_switch_layout->addWidget(huffman_view_title_label);
+    huffman_switch_layout->addStretch();
     huffman_layout->addLayout(huffman_switch_layout);
 
     huffman_label = new QLabel();
@@ -506,6 +515,8 @@ void ImageGUI::initUI()
         huffman_code_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         huffman_code_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         huffman_code_table->setMinimumHeight(420);
+        connect(huffman_code_table, &QTableWidget::cellClicked,
+            this, &ImageGUI::onHuffmanCodeTableCellClicked);
         sidebar_stack->addWidget(huffman_code_table);
 
     sidebar_layout->addWidget(sidebar_stack, 1);
@@ -694,6 +705,7 @@ void ImageGUI::selectImage()
             huffman_selected_area_label = -1;
             huffman_selected_tree_node_index = -1;
             huffman_tree_node_centers.clear();
+            huffman_tree_node_labels.clear();
             huffman_all_label_areas.clear();
             huffman_matched_labels.clear();
             huffman_code_rows.clear();
@@ -1239,13 +1251,15 @@ void ImageGUI::startTask3HuffmanSort()
         const int heightCanvas = max(600, (maxDepth + 2) * 120);
         Mat treeCanvas(heightCanvas, widthCanvas, CV_8UC3, Scalar(245, 245, 245));
         huffman_tree_node_centers.clear();
+        huffman_tree_node_labels.clear();
         drawHuffmanTree(root,
                 treeCanvas,
                 widthCanvas / 2,
                 60,
                 widthCanvas / 4,
                 100,
-                &huffman_tree_node_centers);
+            &huffman_tree_node_centers,
+            &huffman_tree_node_labels);
         putText(treeCanvas,
                 "Huffman Tree",
                 Point(20, 34),
@@ -1702,6 +1716,33 @@ void ImageGUI::onHuffmanAreaTableCellClicked(int row, int column)
 
     huffman_selected_area_label = huffman_all_label_areas[row].first;
     huffman_view_index = 0;
+    tab_widget->setCurrentIndex(3);
+    refreshHuffmanView();
+}
+
+void ImageGUI::onHuffmanCodeTableCellClicked(int row, int column)
+{
+    (void)column;
+
+    if (row < 0 || row >= static_cast<int>(huffman_code_rows.size())) {
+        return;
+    }
+
+    const int targetLabel = get<0>(huffman_code_rows[row]);
+    int hitIndex = -1;
+    for (int i = 0; i < static_cast<int>(huffman_tree_node_labels.size()); ++i) {
+        if (huffman_tree_node_labels[i] == targetLabel) {
+            hitIndex = i;
+            break;
+        }
+    }
+
+    if (hitIndex < 0) {
+        return;
+    }
+
+    huffman_selected_tree_node_index = hitIndex;
+    huffman_view_index = 1;
     tab_widget->setCurrentIndex(3);
     refreshHuffmanView();
 }
