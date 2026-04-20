@@ -32,12 +32,16 @@ file(GLOB HDRS "include/*.hpp")
 include_directories(include ${OpenCV_INCLUDE_DIRS})
 
 # 命令行版本
-add_executable(task src/main.cpp)
+add_executable(task src/task1.cpp)
 target_link_libraries(task ${OpenCV_LIBS})
 
 # 任务2命令行版本
-add_executable(task2 src/task2_main.cpp)
+add_executable(task2 src/task2.cpp)
 target_link_libraries(task2 ${OpenCV_LIBS})
+
+# 任务3命令行版本（排序查找 + 哈夫曼）
+add_executable(task3 src/task3.cpp)
+target_link_libraries(task3 ${OpenCV_LIBS})
 
 # GUI 版本
 set(GUI_HEADERS include/image_gui.hpp)
