@@ -7,7 +7,9 @@
 #include <QSpinBox>
 #include <QComboBox>
 #include <opencv2/opencv.hpp>
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -28,11 +30,14 @@ private slots:
     void onKValueChanged(int value);
     void startSegmentation();
     void startTask2Recolor();
+    void startTask3HuffmanSort();
     void saveResult();
     void onTabChanged(int index);
     void onViewModeChanged(int index);
     void onSeedTableCellClicked(int row, int column);
     void onInfoTableCellClicked(int row, int column);
+    void onHuffmanPrevView();
+    void onHuffmanNextView();
 
 private:
     void initUI();
@@ -45,17 +50,26 @@ private:
     cv::Mat brightenRegionByLabel(const cv::Mat &baseImage,
                                   const cv::Mat &markers,
                                   int targetLabel);
+    void updateHuffmanTable(const std::vector<std::pair<int, int>> &allLabelAreas,
+                            const std::set<int> &matchedLabels);
+    void updateHuffmanCodeTable(const std::vector<std::tuple<int, int, std::string>> &codeRows);
+    void refreshHuffmanView();
     void syncSidebarByTab(int index);
 
     QLabel *original_label;
     QLabel *result_label;
     QLabel *coloring_label;
+    QLabel *huffman_label;
+    QLabel *huffman_view_title_label;
     QLabel *sidebar_title_label;
     QLabel *file_label;
     QLabel *status_label;
     QPushButton *file_button;
     QPushButton *segment_button;
     QPushButton *task2_button;
+    QPushButton *task3_button;
+    QPushButton *huffman_prev_button;
+    QPushButton *huffman_next_button;
     QPushButton *save_button;
     QSpinBox *k_spinbox;
     QComboBox *view_mode_combo;
@@ -64,6 +78,8 @@ private:
     QStackedWidget *sidebar_stack;
     QTableWidget *seed_table;
     QTableWidget *info_table;
+    QTableWidget *huffman_table;
+    QTableWidget *huffman_code_table;
 
     cv::Mat original_image;
     cv::Mat result_image;
@@ -76,6 +92,14 @@ private:
     std::vector<int> task2_region_labels;
     std::vector<int> task2_node_colors;
     std::vector<std::vector<int>> task2_adjacency;
+
+    cv::Mat huffman_highlight_image;
+    cv::Mat huffman_tree_image;
+    int huffman_view_index;
+    std::vector<std::pair<int, int>> huffman_all_label_areas;
+    std::set<int> huffman_matched_labels;
+    std::vector<std::tuple<int, int, std::string>> huffman_code_rows;
+
     std::string image_path;
     int k_value;
 };

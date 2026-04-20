@@ -17,9 +17,14 @@
 #include <QPixmap>
 #include <QImage>
 #include <QApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <cstring>
 #include <array>
+#include <map>
 #include <random>
+#include <set>
 #include <unordered_map>
 #include <opencv2/opencv.hpp>
 #include <chrono>
@@ -29,10 +34,274 @@
 using namespace cv;
 using namespace std;
 
+namespace {
+
+struct GuiRegionArea {
+    int label = 0;
+    int area = 0;
+};
+
+struct GuiHuffmanNode {
+    int weight = 0;
+    int label = -1;
+    GuiHuffmanNode *left = nullptr;
+    GuiHuffmanNode *right = nullptr;
+};
+
+vector<GuiRegionArea> buildRegionAreasFromMarkers(const Mat &markers)
+{
+    unordered_map<int, int> areaByLabel;
+    for (int y = 0; y < markers.rows; ++y) {
+        const int *row = markers.ptr<int>(y);
+        for (int x = 0; x < markers.cols; ++x) {
+            const int label = row[x];
+            if (label > 0) {
+                areaByLabel[label]++;
+            }
+        }
+    }
+
+    vector<GuiRegionArea> areas;
+    areas.reserve(areaByLabel.size());
+    for (const auto &kv : areaByLabel) {
+        areas.push_back(GuiRegionArea{kv.first, kv.second});
+    }
+
+    sort(areas.begin(), areas.end(), [](const GuiRegionArea &a, const GuiRegionArea &b) {
+        if (a.area != b.area) {
+            return a.area < b.area;
+        }
+        return a.label < b.label;
+    });
+
+    return areas;
+}
+
+pair<int, int> findAreaRange(const vector<GuiRegionArea> &sortedAreas, int low, int high)
+{
+    if (sortedAreas.empty() || low > high) {
+        return {-1, -1};
+    }
+
+    auto lb = lower_bound(sortedAreas.begin(), sortedAreas.end(), low,
+                          [](const GuiRegionArea &r, int value) { return r.area < value; });
+    auto ub = upper_bound(sortedAreas.begin(), sortedAreas.end(), high,
+                          [](int value, const GuiRegionArea &r) { return value < r.area; });
+
+    if (lb == sortedAreas.end() || lb >= ub) {
+        return {-1, -1};
+    }
+
+    const int first = static_cast<int>(distance(sortedAreas.begin(), lb));
+    const int last = static_cast<int>(distance(sortedAreas.begin(), ub)) - 1;
+    return {first, last};
+}
+
+unordered_map<int, Point> computeRegionCentroids(const Mat &markers,
+                                                 const vector<GuiRegionArea> &selected)
+{
+    set<int> selectedLabels;
+    for (const auto &r : selected) {
+        selectedLabels.insert(r.label);
+    }
+
+    struct Acc {
+        long long sx = 0;
+        long long sy = 0;
+        int count = 0;
+    };
+
+    unordered_map<int, Acc> acc;
+    for (int y = 0; y < markers.rows; ++y) {
+        const int *row = markers.ptr<int>(y);
+        for (int x = 0; x < markers.cols; ++x) {
+            const int label = row[x];
+            if (selectedLabels.find(label) != selectedLabels.end()) {
+                auto &a = acc[label];
+                a.sx += x;
+                a.sy += y;
+                a.count++;
+            }
+        }
+    }
+
+    unordered_map<int, Point> centroids;
+    for (const auto &kv : acc) {
+        if (kv.second.count > 0) {
+            centroids[kv.first] = Point(static_cast<int>(kv.second.sx / kv.second.count),
+                                        static_cast<int>(kv.second.sy / kv.second.count));
+        }
+    }
+    return centroids;
+}
+
+void putCenteredText(Mat &image,
+                     const string &text,
+                     const Point &center,
+                     double fontScale,
+                     const Scalar &color,
+                     int thickness)
+{
+    int baseline = 0;
+    const Size textSize = getTextSize(text, FONT_HERSHEY_SIMPLEX, fontScale, thickness, &baseline);
+    Point org(center.x - textSize.width / 2, center.y + textSize.height / 2);
+
+    org.x = max(0, min(org.x, image.cols - textSize.width - 1));
+    org.y = max(textSize.height, min(org.y, image.rows - 1));
+
+    putText(image, text, org, FONT_HERSHEY_SIMPLEX, fontScale, color, thickness, LINE_AA);
+}
+
+struct QueueNode {
+    GuiHuffmanNode *node = nullptr;
+    int minLeafLabel = -1;
+    int serial = 0;
+};
+
+struct QueueNodeCmp {
+    bool operator()(const QueueNode &a, const QueueNode &b) const
+    {
+        if (a.node->weight != b.node->weight) {
+            return a.node->weight > b.node->weight;
+        }
+        if (a.minLeafLabel != b.minLeafLabel) {
+            return a.minLeafLabel > b.minLeafLabel;
+        }
+        return a.serial > b.serial;
+    }
+};
+
+GuiHuffmanNode *buildHuffmanTree(const vector<GuiRegionArea> &selected)
+{
+    if (selected.empty()) {
+        return nullptr;
+    }
+
+    priority_queue<QueueNode, vector<QueueNode>, QueueNodeCmp> pq;
+    int serial = 0;
+    for (const auto &r : selected) {
+        auto *leaf = new GuiHuffmanNode();
+        leaf->weight = r.area;
+        leaf->label = r.label;
+        pq.push(QueueNode{leaf, r.label, serial++});
+    }
+
+    if (pq.size() == 1) {
+        return pq.top().node;
+    }
+
+    while (pq.size() > 1) {
+        QueueNode left = pq.top();
+        pq.pop();
+        QueueNode right = pq.top();
+        pq.pop();
+
+        auto *parent = new GuiHuffmanNode();
+        parent->weight = left.node->weight + right.node->weight;
+        parent->label = -1;
+        parent->left = left.node;
+        parent->right = right.node;
+
+        const int minLeafLabel = min(left.minLeafLabel, right.minLeafLabel);
+        pq.push(QueueNode{parent, minLeafLabel, serial++});
+    }
+
+    return pq.top().node;
+}
+
+void generateHuffmanCodes(const GuiHuffmanNode *root,
+                          const string &prefix,
+                          map<int, string> &outCodes,
+                          int depth,
+                          int &maxDepth)
+{
+    if (!root) {
+        return;
+    }
+
+    maxDepth = max(maxDepth, depth);
+    if (!root->left && !root->right) {
+        outCodes[root->label] = prefix.empty() ? "0" : prefix;
+        return;
+    }
+
+    generateHuffmanCodes(root->left, prefix + "0", outCodes, depth + 1, maxDepth);
+    generateHuffmanCodes(root->right, prefix + "1", outCodes, depth + 1, maxDepth);
+}
+
+int countHuffmanLeaves(const GuiHuffmanNode *root)
+{
+    if (!root) {
+        return 0;
+    }
+    if (!root->left && !root->right) {
+        return 1;
+    }
+    return countHuffmanLeaves(root->left) + countHuffmanLeaves(root->right);
+}
+
+void drawHuffmanTree(const GuiHuffmanNode *root,
+                     Mat &canvas,
+                     int x,
+                     int y,
+                     int xOffset,
+                     int levelHeight)
+{
+    if (!root) {
+        return;
+    }
+
+    const Scalar edgeColor(90, 90, 90);
+    const Scalar nodeColor(255, 255, 255);
+    const Scalar textColor(30, 30, 30);
+
+    if (root->left) {
+        const int childX = x - xOffset;
+        const int childY = y + levelHeight;
+        line(canvas, Point(x, y), Point(childX, childY), edgeColor, 1, LINE_AA);
+        putText(canvas, "0", Point((x + childX) / 2 - 8, (y + childY) / 2),
+                FONT_HERSHEY_SIMPLEX, 0.45, Scalar(120, 120, 120), 1, LINE_AA);
+        drawHuffmanTree(root->left, canvas, childX, childY, max(24, xOffset / 2), levelHeight);
+    }
+    if (root->right) {
+        const int childX = x + xOffset;
+        const int childY = y + levelHeight;
+        line(canvas, Point(x, y), Point(childX, childY), edgeColor, 1, LINE_AA);
+        putText(canvas, "1", Point((x + childX) / 2 + 2, (y + childY) / 2),
+                FONT_HERSHEY_SIMPLEX, 0.45, Scalar(120, 120, 120), 1, LINE_AA);
+        drawHuffmanTree(root->right, canvas, childX, childY, max(24, xOffset / 2), levelHeight);
+    }
+
+    circle(canvas, Point(x, y), 16, nodeColor, FILLED, LINE_AA);
+    circle(canvas, Point(x, y), 16, Scalar(120, 120, 120), 1, LINE_AA);
+
+    if (!root->left && !root->right) {
+        const string text = to_string(root->weight);
+        putCenteredText(canvas, text, Point(x, y), 0.35, textColor, 1);
+    }
+}
+
+void destroyHuffmanTree(GuiHuffmanNode *root)
+{
+    if (!root) {
+        return;
+    }
+    destroyHuffmanTree(root->left);
+    destroyHuffmanTree(root->right);
+    delete root;
+}
+
+}  // namespace
+
 ImageGUI::ImageGUI(QWidget *parent)
     : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr),
       sidebar_widget(nullptr), sidebar_stack(nullptr), seed_table(nullptr), info_table(nullptr),
-      sidebar_title_label(nullptr), view_mode_combo(nullptr)
+      huffman_table(nullptr), huffman_code_table(nullptr), huffman_view_index(0),
+      original_label(nullptr), result_label(nullptr), coloring_label(nullptr), huffman_label(nullptr),
+      huffman_view_title_label(nullptr), sidebar_title_label(nullptr), file_label(nullptr),
+      status_label(nullptr), file_button(nullptr), segment_button(nullptr), task2_button(nullptr),
+      task3_button(nullptr), huffman_prev_button(nullptr), huffman_next_button(nullptr),
+      save_button(nullptr), k_spinbox(nullptr), view_mode_combo(nullptr)
 {
     initUI();
 }
@@ -97,6 +366,41 @@ void ImageGUI::initUI()
     coloring_scroll->setWidgetResizable(true);
     tab_widget->addTab(coloring_scroll, "着色结果");
 
+    // Task3 Huffman结果页：顶部左右切换“高亮区域”与“Huffman树”。
+    QWidget *huffman_page = new QWidget();
+    QVBoxLayout *huffman_layout = new QVBoxLayout(huffman_page);
+    QHBoxLayout *huffman_switch_layout = new QHBoxLayout();
+
+    huffman_prev_button = new QPushButton("< 左切换");
+    connect(huffman_prev_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanPrevView);
+    huffman_prev_button->setEnabled(false);
+
+    huffman_view_title_label = new QLabel("高亮区域");
+    huffman_view_title_label->setAlignment(Qt::AlignCenter);
+    huffman_view_title_label->setStyleSheet("font-weight: bold; color: #333;");
+
+    huffman_next_button = new QPushButton("右切换 >");
+    connect(huffman_next_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanNextView);
+    huffman_next_button->setEnabled(false);
+
+    huffman_switch_layout->addWidget(huffman_prev_button);
+    huffman_switch_layout->addWidget(huffman_view_title_label, 1);
+    huffman_switch_layout->addWidget(huffman_next_button);
+    huffman_layout->addLayout(huffman_switch_layout);
+
+    huffman_label = new QLabel();
+    huffman_label->setStyleSheet("border: 1px solid #ccc;");
+    huffman_label->setMinimumHeight(400);
+    huffman_label->setMinimumWidth(600);
+    huffman_label->setAlignment(Qt::AlignCenter);
+    huffman_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    QScrollArea *huffman_scroll = new QScrollArea();
+    huffman_scroll->setWidget(huffman_label);
+    huffman_scroll->setWidgetResizable(true);
+    huffman_layout->addWidget(huffman_scroll, 1);
+
+    tab_widget->addTab(huffman_page, "Huffman排序");
+
     // 隐藏原有页签栏，改用固定下拉框切换观察模式。
     tab_widget->tabBar()->hide();
     connect(tab_widget, &QTabWidget::currentChanged, this, &ImageGUI::onTabChanged);
@@ -149,6 +453,37 @@ void ImageGUI::initUI()
             this, &ImageGUI::onInfoTableCellClicked);
     sidebar_stack->addWidget(info_table);
 
+        huffman_table = new QTableWidget();
+        huffman_table->setColumnCount(2);
+        huffman_table->setHorizontalHeaderLabels(QStringList() << "编号" << "面积");
+        huffman_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        huffman_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        huffman_table->setSelectionMode(QAbstractItemView::SingleSelection);
+        huffman_table->setAlternatingRowColors(true);
+        huffman_table->verticalHeader()->setVisible(false);
+        huffman_table->horizontalHeader()->setStretchLastSection(true);
+        huffman_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        huffman_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        huffman_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        huffman_table->setMinimumHeight(420);
+        sidebar_stack->addWidget(huffman_table);
+
+        huffman_code_table = new QTableWidget();
+        huffman_code_table->setColumnCount(3);
+        huffman_code_table->setHorizontalHeaderLabels(QStringList() << "编号" << "面积" << "编码");
+        huffman_code_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        huffman_code_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        huffman_code_table->setSelectionMode(QAbstractItemView::SingleSelection);
+        huffman_code_table->setAlternatingRowColors(true);
+        huffman_code_table->verticalHeader()->setVisible(false);
+        huffman_code_table->horizontalHeader()->setStretchLastSection(true);
+        huffman_code_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        huffman_code_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        huffman_code_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        huffman_code_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        huffman_code_table->setMinimumHeight(420);
+        sidebar_stack->addWidget(huffman_code_table);
+
     sidebar_layout->addWidget(sidebar_stack, 1);
 
     content_layout->addWidget(sidebar_widget);
@@ -189,6 +524,7 @@ QWidget *ImageGUI::createControlPanel()
         view_mode_combo->addItem("原始图像");
         view_mode_combo->addItem("分割结果");
         view_mode_combo->addItem("着色结果");
+        view_mode_combo->addItem("Huffman排序");
         view_mode_combo->setCurrentIndex(0);
         view_mode_combo->setMinimumWidth(180);
         connect(view_mode_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -249,6 +585,26 @@ QWidget *ImageGUI::createControlPanel()
         "}");
     layout->addWidget(task2_button);
 
+    // Task3 按钮
+    task3_button = new QPushButton("Huffman排序");
+    connect(task3_button, &QPushButton::clicked, this, &ImageGUI::startTask3HuffmanSort);
+    task3_button->setStyleSheet(
+        "QPushButton {"
+        "    background-color: #009688;"
+        "    color: white;"
+        "    border: none;"
+        "    padding: 8px 20px;"
+        "    border-radius: 4px;"
+        "    font-weight: bold;"
+        "}"
+        "QPushButton:hover {"
+        "    background-color: #00897b;"
+        "}"
+        "QPushButton:pressed {"
+        "    background-color: #00796b;"
+        "}");
+    layout->addWidget(task3_button);
+
     layout->addStretch();
 
     // 保存结果按钮
@@ -298,6 +654,8 @@ void ImageGUI::selectImage()
             tab_widget->setCurrentIndex(0);
             updateSeedTable(vector<Point>());
             updateRegionInfoTable({}, {}, {});
+            updateHuffmanTable({}, {});
+            updateHuffmanCodeTable({});
             task1_cached_image.release();
             task1_display_image.release();
             task2_display_image.release();
@@ -306,6 +664,13 @@ void ImageGUI::selectImage()
             task2_region_labels.clear();
             task2_node_colors.clear();
             task2_adjacency.clear();
+            huffman_highlight_image.release();
+            huffman_tree_image.release();
+            huffman_view_index = 0;
+            huffman_all_label_areas.clear();
+            huffman_matched_labels.clear();
+            huffman_code_rows.clear();
+            refreshHuffmanView();
             string status = "已加载图像: " + to_string(original_image.cols) + "x" +
                           to_string(original_image.rows);
             status_label->setText(QString::fromStdString(status));
@@ -336,6 +701,7 @@ void ImageGUI::startSegmentation()
     // 禁用按钮
     segment_button->setEnabled(false);
     task2_button->setEnabled(false);
+    task3_button->setEnabled(false);
     file_button->setEnabled(false);
     k_spinbox->setEnabled(false);
 
@@ -443,6 +809,7 @@ void ImageGUI::startSegmentation()
     // 启用按钮
     segment_button->setEnabled(true);
     task2_button->setEnabled(true);
+    task3_button->setEnabled(true);
     file_button->setEnabled(true);
     k_spinbox->setEnabled(true);
 }
@@ -491,6 +858,7 @@ void ImageGUI::startTask2Recolor()
     // 禁用按钮
     segment_button->setEnabled(false);
     task2_button->setEnabled(false);
+    task3_button->setEnabled(false);
     file_button->setEnabled(false);
     k_spinbox->setEnabled(false);
 
@@ -652,6 +1020,238 @@ void ImageGUI::startTask2Recolor()
     // 启用按钮
     segment_button->setEnabled(true);
     task2_button->setEnabled(true);
+    task3_button->setEnabled(true);
+    file_button->setEnabled(true);
+    k_spinbox->setEnabled(true);
+}
+
+void ImageGUI::startTask3HuffmanSort()
+{
+    if (image_path.empty()) {
+        QMessageBox::warning(this, "警告", "请先选择图像文件");
+        return;
+    }
+
+    if (original_image.empty()) {
+        QMessageBox::warning(this, "警告", "图像为空");
+        return;
+    }
+
+    segment_button->setEnabled(false);
+    task2_button->setEnabled(false);
+    task3_button->setEnabled(false);
+    file_button->setEnabled(false);
+    k_spinbox->setEnabled(false);
+
+    GuiHuffmanNode *root = nullptr;
+
+    try {
+        auto start_time = chrono::high_resolution_clock::now();
+        status_label->setText("Task3: 生成分水岭区域");
+        qApp->processEvents();
+
+        const int width = original_image.cols;
+        const int height = original_image.rows;
+        vector<Point> seedPoints = SeedSampler::generateSeeds(width, height, k_value);
+        if (seedPoints.empty()) {
+            throw runtime_error("种子点生成失败");
+        }
+
+        Mat markers = Mat::zeros(original_image.size(), CV_32S);
+        for (size_t i = 0; i < seedPoints.size(); ++i) {
+            circle(markers, seedPoints[i], 1, Scalar(static_cast<int>(i + 1)), -1);
+        }
+
+        Mat shifted;
+        pyrMeanShiftFiltering(original_image, shifted, 10, 51);
+        watershed(shifted, markers);
+
+        vector<GuiRegionArea> allAreas = buildRegionAreasFromMarkers(markers);
+        if (allAreas.empty()) {
+            throw runtime_error("分水岭未得到有效区域");
+        }
+
+        const int minArea = allAreas.front().area;
+        const int maxArea = allAreas.back().area;
+
+        QDialog rangeDialog(this);
+        rangeDialog.setWindowTitle("Huffman排序 - 面积范围");
+        QFormLayout form(&rangeDialog);
+
+        QSpinBox minSpin;
+        minSpin.setRange(minArea, maxArea);
+        minSpin.setValue(minArea);
+        form.addRow("最小面积:", &minSpin);
+
+        QSpinBox maxSpin;
+        maxSpin.setRange(minArea, maxArea);
+        maxSpin.setValue(maxArea);
+        form.addRow("最大面积:", &maxSpin);
+
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                 Qt::Horizontal,
+                                 &rangeDialog);
+        form.addWidget(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &rangeDialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &rangeDialog, &QDialog::reject);
+
+        if (rangeDialog.exec() != QDialog::Accepted) {
+            status_label->setText("Task3: 已取消");
+            segment_button->setEnabled(true);
+            task2_button->setEnabled(true);
+            task3_button->setEnabled(true);
+            file_button->setEnabled(true);
+            k_spinbox->setEnabled(true);
+            return;
+        }
+
+        int low = minSpin.value();
+        int high = maxSpin.value();
+        if (low > high) {
+            swap(low, high);
+        }
+
+        const pair<int, int> range = findAreaRange(allAreas, low, high);
+        if (range.first < 0) {
+            QMessageBox::information(this, "提示", "当前面积范围内没有匹配区域");
+            status_label->setText("Task3: 未找到匹配区域");
+            segment_button->setEnabled(true);
+            task2_button->setEnabled(true);
+            task3_button->setEnabled(true);
+            file_button->setEnabled(true);
+            k_spinbox->setEnabled(true);
+            return;
+        }
+
+        vector<GuiRegionArea> selected;
+        selected.reserve(static_cast<size_t>(range.second - range.first + 1));
+        for (int i = range.first; i <= range.second; ++i) {
+            selected.push_back(allAreas[i]);
+        }
+
+        huffman_matched_labels.clear();
+        for (const auto &r : selected) {
+            huffman_matched_labels.insert(r.label);
+        }
+
+        unordered_map<int, Vec3b> colorByLabel;
+        mt19937 rng(static_cast<unsigned int>(chrono::high_resolution_clock::now().time_since_epoch().count()));
+        uniform_int_distribution<int> ch(80, 255);
+        for (const auto &r : selected) {
+            colorByLabel[r.label] = Vec3b(static_cast<uchar>(ch(rng)),
+                                          static_cast<uchar>(ch(rng)),
+                                          static_cast<uchar>(ch(rng)));
+        }
+
+        Mat highlightMask = Mat::zeros(original_image.size(), CV_8UC3);
+        for (int y = 0; y < markers.rows; ++y) {
+            for (int x = 0; x < markers.cols; ++x) {
+                const int label = markers.at<int>(y, x);
+                if (label == -1) {
+                    highlightMask.at<Vec3b>(y, x) = Vec3b(255, 255, 255);
+                } else if (huffman_matched_labels.find(label) != huffman_matched_labels.end()) {
+                    highlightMask.at<Vec3b>(y, x) = colorByLabel[label];
+                }
+            }
+        }
+
+        Mat highlighted;
+        addWeighted(original_image, 0.45, highlightMask, 0.55, 0.0, highlighted);
+
+        const auto centroids = computeRegionCentroids(markers, selected);
+        for (const auto &r : selected) {
+            auto it = centroids.find(r.label);
+            if (it != centroids.end()) {
+                putCenteredText(highlighted,
+                                to_string(r.area),
+                                it->second,
+                                0.48,
+                                Scalar(255, 255, 255),
+                                1);
+            }
+        }
+
+        root = buildHuffmanTree(selected);
+        if (!root) {
+            throw runtime_error("Huffman树构建失败");
+        }
+
+        map<int, string> codes;
+        int maxDepth = 0;
+        generateHuffmanCodes(root, "", codes, 0, maxDepth);
+
+        huffman_code_rows.clear();
+        huffman_code_rows.reserve(selected.size());
+        for (const auto &r : selected) {
+            const auto it = codes.find(r.label);
+            if (it != codes.end()) {
+                huffman_code_rows.push_back(make_tuple(r.label, r.area, it->second));
+            }
+        }
+        sort(huffman_code_rows.begin(), huffman_code_rows.end(),
+             [](const tuple<int, int, string> &a, const tuple<int, int, string> &b) {
+                 const string &codeA = get<2>(a);
+                 const string &codeB = get<2>(b);
+                 if (codeA.size() != codeB.size()) {
+                     return codeA.size() < codeB.size();
+                 }
+                 if (get<1>(a) != get<1>(b)) {
+                     return get<1>(a) < get<1>(b);
+                 }
+                 return get<0>(a) < get<0>(b);
+             });
+
+        const int leaves = max(2, countHuffmanLeaves(root));
+        const int widthCanvas = max(1200, leaves * 80);
+        const int heightCanvas = max(600, (maxDepth + 2) * 120);
+        Mat treeCanvas(heightCanvas, widthCanvas, CV_8UC3, Scalar(245, 245, 245));
+        drawHuffmanTree(root, treeCanvas, widthCanvas / 2, 60, widthCanvas / 4, 100);
+        putText(treeCanvas,
+                "Huffman Tree",
+                Point(20, 34),
+                FONT_HERSHEY_SIMPLEX,
+                0.85,
+                Scalar(50, 50, 50),
+                2,
+                LINE_AA);
+
+        huffman_highlight_image = highlighted;
+        huffman_tree_image = treeCanvas;
+        huffman_view_index = 0;
+
+        huffman_all_label_areas.clear();
+        huffman_all_label_areas.reserve(allAreas.size());
+        for (const auto &r : allAreas) {
+            huffman_all_label_areas.push_back({r.label, r.area});
+        }
+        updateHuffmanTable(huffman_all_label_areas, huffman_matched_labels);
+        updateHuffmanCodeTable(huffman_code_rows);
+
+        refreshHuffmanView();
+        tab_widget->setCurrentIndex(3);
+        save_button->setEnabled(true);
+
+        auto end_time = chrono::high_resolution_clock::now();
+        chrono::duration<double, milli> duration = end_time - start_time;
+        status_label->setText(QString("Task3完成! 耗时: %1 ms, 匹配区域: %2, 编码节点: %3")
+                                  .arg(duration.count(), 0, 'f', 2)
+                                  .arg(selected.size())
+                                  .arg(codes.size()));
+
+        destroyHuffmanTree(root);
+        root = nullptr;
+    } catch (const exception &e) {
+        if (root) {
+            destroyHuffmanTree(root);
+            root = nullptr;
+        }
+        QMessageBox::critical(this, "错误", QString("Task3处理失败: %1").arg(e.what()));
+        status_label->setText("Task3处理失败");
+    }
+
+    segment_button->setEnabled(true);
+    task2_button->setEnabled(true);
+    task3_button->setEnabled(true);
     file_button->setEnabled(true);
     k_spinbox->setEnabled(true);
 }
@@ -783,6 +1383,107 @@ void ImageGUI::updateRegionInfoTable(const vector<int> &regionLabels,
     info_table->clearSelection();
 }
 
+void ImageGUI::updateHuffmanTable(const vector<pair<int, int>> &allLabelAreas,
+                                  const set<int> &matchedLabels)
+{
+    if (!huffman_table) {
+        return;
+    }
+
+    huffman_table->clearContents();
+    huffman_table->setRowCount(static_cast<int>(allLabelAreas.size()));
+
+    const QColor hitBg(255, 245, 190);
+    const QColor hitText(80, 50, 0);
+
+    for (int i = 0; i < static_cast<int>(allLabelAreas.size()); ++i) {
+        const int label = allLabelAreas[i].first;
+        const int area = allLabelAreas[i].second;
+
+        QTableWidgetItem *labelItem = new QTableWidgetItem(QString::number(label));
+        labelItem->setTextAlignment(Qt::AlignCenter);
+        huffman_table->setItem(i, 0, labelItem);
+
+        QTableWidgetItem *areaItem = new QTableWidgetItem(QString::number(area));
+        areaItem->setTextAlignment(Qt::AlignCenter);
+        huffman_table->setItem(i, 1, areaItem);
+
+        if (matchedLabels.find(label) != matchedLabels.end()) {
+            labelItem->setBackground(QBrush(hitBg));
+            areaItem->setBackground(QBrush(hitBg));
+            labelItem->setForeground(QBrush(hitText));
+            areaItem->setForeground(QBrush(hitText));
+
+            QFont boldFont = labelItem->font();
+            boldFont.setBold(true);
+            labelItem->setFont(boldFont);
+            areaItem->setFont(boldFont);
+        }
+    }
+
+    huffman_table->clearSelection();
+}
+
+void ImageGUI::updateHuffmanCodeTable(const vector<tuple<int, int, string>> &codeRows)
+{
+    if (!huffman_code_table) {
+        return;
+    }
+
+    huffman_code_table->clearContents();
+    huffman_code_table->setRowCount(static_cast<int>(codeRows.size()));
+
+    for (int i = 0; i < static_cast<int>(codeRows.size()); ++i) {
+        const int label = get<0>(codeRows[i]);
+        const int area = get<1>(codeRows[i]);
+        const string &code = get<2>(codeRows[i]);
+
+        QTableWidgetItem *labelItem = new QTableWidgetItem(QString::number(label));
+        labelItem->setTextAlignment(Qt::AlignCenter);
+        huffman_code_table->setItem(i, 0, labelItem);
+
+        QTableWidgetItem *areaItem = new QTableWidgetItem(QString::number(area));
+        areaItem->setTextAlignment(Qt::AlignCenter);
+        huffman_code_table->setItem(i, 1, areaItem);
+
+        QTableWidgetItem *codeItem = new QTableWidgetItem(QString::fromStdString(code));
+        codeItem->setTextAlignment(Qt::AlignCenter);
+        huffman_code_table->setItem(i, 2, codeItem);
+    }
+
+    huffman_code_table->clearSelection();
+}
+
+void ImageGUI::refreshHuffmanView()
+{
+    if (!huffman_prev_button || !huffman_next_button || !huffman_view_title_label || !huffman_label) {
+        return;
+    }
+
+    const bool hasImages = !huffman_highlight_image.empty() && !huffman_tree_image.empty();
+    huffman_prev_button->setEnabled(hasImages);
+    huffman_next_button->setEnabled(hasImages);
+
+    if (!hasImages) {
+        huffman_view_title_label->setText("高亮区域");
+        huffman_label->clear();
+        syncSidebarByTab(3);
+        return;
+    }
+
+    if (huffman_view_index == 0) {
+        huffman_view_title_label->setText("高亮区域");
+        displayImage(huffman_highlight_image, huffman_label);
+        result_image = huffman_highlight_image;
+    } else {
+        huffman_view_title_label->setText("Huffman树");
+        displayImage(huffman_tree_image, huffman_label);
+        result_image = huffman_tree_image;
+    }
+
+    syncSidebarByTab(3);
+}
+
 Mat ImageGUI::brightenRegionByLabel(const Mat &baseImage,
                                     const Mat &markers,
                                     int targetLabel)
@@ -869,6 +1570,8 @@ void ImageGUI::onTabChanged(int index)
             displayImage(task2_base_image, coloring_label);
             result_image = task2_base_image;
         }
+    } else if (index == 3) {
+        refreshHuffmanView();
     }
 }
 
@@ -881,6 +1584,24 @@ void ImageGUI::onViewModeChanged(int index)
         return;
     }
     tab_widget->setCurrentIndex(index);
+}
+
+void ImageGUI::onHuffmanPrevView()
+{
+    if (huffman_highlight_image.empty() || huffman_tree_image.empty()) {
+        return;
+    }
+    huffman_view_index = (huffman_view_index == 0) ? 1 : 0;
+    refreshHuffmanView();
+}
+
+void ImageGUI::onHuffmanNextView()
+{
+    if (huffman_highlight_image.empty() || huffman_tree_image.empty()) {
+        return;
+    }
+    huffman_view_index = (huffman_view_index == 0) ? 1 : 0;
+    refreshHuffmanView();
 }
 
 void ImageGUI::syncSidebarByTab(int index)
@@ -898,8 +1619,18 @@ void ImageGUI::syncSidebarByTab(int index)
     if (index == 1) {
         sidebar_title_label->setText("采样点坐标");
         sidebar_stack->setCurrentIndex(0);
-    } else {
+    } else if (index == 2) {
         sidebar_title_label->setText("区域着色信息");
         sidebar_stack->setCurrentIndex(1);
+    } else if (index == 3) {
+        if (huffman_view_index == 0) {
+            sidebar_title_label->setText("区域面积表");
+            sidebar_stack->setCurrentIndex(2);
+        } else {
+            sidebar_title_label->setText("Huffman编码结果");
+            sidebar_stack->setCurrentIndex(3);
+        }
+    } else {
+        sidebar_widget->hide();
     }
 }
