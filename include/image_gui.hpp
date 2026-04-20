@@ -7,6 +7,7 @@
 #include <QSpinBox>
 #include <QComboBox>
 #include <opencv2/opencv.hpp>
+#include <QObject>
 #include <set>
 #include <string>
 #include <tuple>
@@ -36,8 +37,12 @@ private slots:
     void onViewModeChanged(int index);
     void onSeedTableCellClicked(int row, int column);
     void onInfoTableCellClicked(int row, int column);
-    void onHuffmanPrevView();
-    void onHuffmanNextView();
+    void onHuffmanAreaViewClicked();
+    void onHuffmanTreeViewClicked();
+    void onHuffmanAreaTableCellClicked(int row, int column);
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void initUI();
@@ -68,8 +73,8 @@ private:
     QPushButton *segment_button;
     QPushButton *task2_button;
     QPushButton *task3_button;
-    QPushButton *huffman_prev_button;
-    QPushButton *huffman_next_button;
+    QPushButton *huffman_area_button;
+    QPushButton *huffman_tree_button;
     QPushButton *save_button;
     QSpinBox *k_spinbox;
     QComboBox *view_mode_combo;
@@ -95,7 +100,13 @@ private:
 
     cv::Mat huffman_highlight_image;
     cv::Mat huffman_tree_image;
+    cv::Mat huffman_markers;
     int huffman_view_index;
+    int huffman_selected_area_label;
+    int huffman_selected_tree_node_index;
+    int huffman_last_low;
+    int huffman_last_high;
+    std::vector<cv::Point> huffman_tree_node_centers;
     std::vector<std::pair<int, int>> huffman_all_label_areas;
     std::set<int> huffman_matched_labels;
     std::vector<std::tuple<int, int, std::string>> huffman_code_rows;

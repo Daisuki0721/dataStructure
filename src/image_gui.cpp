@@ -17,6 +17,8 @@
 #include <QPixmap>
 #include <QImage>
 #include <QApplication>
+#include <QEvent>
+#include <QMouseEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -245,7 +247,8 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
                      int x,
                      int y,
                      int xOffset,
-                     int levelHeight)
+                     int levelHeight,
+                     vector<Point> *nodeCenters)
 {
     if (!root) {
         return;
@@ -261,7 +264,13 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
         line(canvas, Point(x, y), Point(childX, childY), edgeColor, 1, LINE_AA);
         putText(canvas, "0", Point((x + childX) / 2 - 8, (y + childY) / 2),
                 FONT_HERSHEY_SIMPLEX, 0.45, Scalar(120, 120, 120), 1, LINE_AA);
-        drawHuffmanTree(root->left, canvas, childX, childY, max(24, xOffset / 2), levelHeight);
+        drawHuffmanTree(root->left,
+                        canvas,
+                        childX,
+                        childY,
+                        max(24, xOffset / 2),
+                        levelHeight,
+                        nodeCenters);
     }
     if (root->right) {
         const int childX = x + xOffset;
@@ -269,7 +278,17 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
         line(canvas, Point(x, y), Point(childX, childY), edgeColor, 1, LINE_AA);
         putText(canvas, "1", Point((x + childX) / 2 + 2, (y + childY) / 2),
                 FONT_HERSHEY_SIMPLEX, 0.45, Scalar(120, 120, 120), 1, LINE_AA);
-        drawHuffmanTree(root->right, canvas, childX, childY, max(24, xOffset / 2), levelHeight);
+        drawHuffmanTree(root->right,
+                        canvas,
+                        childX,
+                        childY,
+                        max(24, xOffset / 2),
+                        levelHeight,
+                        nodeCenters);
+    }
+
+    if (nodeCenters) {
+        nodeCenters->push_back(Point(x, y));
     }
 
     circle(canvas, Point(x, y), 16, nodeColor, FILLED, LINE_AA);
@@ -297,10 +316,12 @@ ImageGUI::ImageGUI(QWidget *parent)
     : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr),
       sidebar_widget(nullptr), sidebar_stack(nullptr), seed_table(nullptr), info_table(nullptr),
       huffman_table(nullptr), huffman_code_table(nullptr), huffman_view_index(0),
+      huffman_selected_area_label(-1), huffman_selected_tree_node_index(-1),
+      huffman_last_low(25), huffman_last_high(1000),
       original_label(nullptr), result_label(nullptr), coloring_label(nullptr), huffman_label(nullptr),
       huffman_view_title_label(nullptr), sidebar_title_label(nullptr), file_label(nullptr),
       status_label(nullptr), file_button(nullptr), segment_button(nullptr), task2_button(nullptr),
-      task3_button(nullptr), huffman_prev_button(nullptr), huffman_next_button(nullptr),
+      task3_button(nullptr), huffman_area_button(nullptr), huffman_tree_button(nullptr),
       save_button(nullptr), k_spinbox(nullptr), view_mode_combo(nullptr)
 {
     initUI();
@@ -366,26 +387,26 @@ void ImageGUI::initUI()
     coloring_scroll->setWidgetResizable(true);
     tab_widget->addTab(coloring_scroll, "着色结果");
 
-    // Task3 Huffman结果页：顶部左右切换“高亮区域”与“Huffman树”。
+    // Task3 Huffman结果页：顶部按钮切换“面积区域”与“Huffman树”。
     QWidget *huffman_page = new QWidget();
     QVBoxLayout *huffman_layout = new QVBoxLayout(huffman_page);
     QHBoxLayout *huffman_switch_layout = new QHBoxLayout();
 
-    huffman_prev_button = new QPushButton("< 左切换");
-    connect(huffman_prev_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanPrevView);
-    huffman_prev_button->setEnabled(false);
+    huffman_area_button = new QPushButton("面积区域");
+    huffman_area_button->setCheckable(true);
+    connect(huffman_area_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanAreaViewClicked);
 
     huffman_view_title_label = new QLabel("高亮区域");
     huffman_view_title_label->setAlignment(Qt::AlignCenter);
     huffman_view_title_label->setStyleSheet("font-weight: bold; color: #333;");
 
-    huffman_next_button = new QPushButton("右切换 >");
-    connect(huffman_next_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanNextView);
-    huffman_next_button->setEnabled(false);
+    huffman_tree_button = new QPushButton("Huffman树");
+    huffman_tree_button->setCheckable(true);
+    connect(huffman_tree_button, &QPushButton::clicked, this, &ImageGUI::onHuffmanTreeViewClicked);
 
-    huffman_switch_layout->addWidget(huffman_prev_button);
+    huffman_switch_layout->addWidget(huffman_area_button);
     huffman_switch_layout->addWidget(huffman_view_title_label, 1);
-    huffman_switch_layout->addWidget(huffman_next_button);
+    huffman_switch_layout->addWidget(huffman_tree_button);
     huffman_layout->addLayout(huffman_switch_layout);
 
     huffman_label = new QLabel();
@@ -398,6 +419,7 @@ void ImageGUI::initUI()
     huffman_scroll->setWidget(huffman_label);
     huffman_scroll->setWidgetResizable(true);
     huffman_layout->addWidget(huffman_scroll, 1);
+    huffman_label->installEventFilter(this);
 
     tab_widget->addTab(huffman_page, "Huffman排序");
 
@@ -466,6 +488,8 @@ void ImageGUI::initUI()
         huffman_table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         huffman_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         huffman_table->setMinimumHeight(420);
+            connect(huffman_table, &QTableWidget::cellClicked,
+                this, &ImageGUI::onHuffmanAreaTableCellClicked);
         sidebar_stack->addWidget(huffman_table);
 
         huffman_code_table = new QTableWidget();
@@ -536,9 +560,8 @@ QWidget *ImageGUI::createControlPanel()
     // K值输入
     layout->addWidget(new QLabel("K值 (种子数):"));
     k_spinbox = new QSpinBox();
-    k_spinbox->setMinimum(1);
+    k_spinbox->setMinimum(25);
     k_spinbox->setMaximum(1000);
-    k_spinbox->setValue(25);
     connect(k_spinbox, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &ImageGUI::onKValueChanged);
     layout->addWidget(k_spinbox);
@@ -666,7 +689,11 @@ void ImageGUI::selectImage()
             task2_adjacency.clear();
             huffman_highlight_image.release();
             huffman_tree_image.release();
+            huffman_markers.release();
             huffman_view_index = 0;
+            huffman_selected_area_label = -1;
+            huffman_selected_tree_node_index = -1;
+            huffman_tree_node_centers.clear();
             huffman_all_label_areas.clear();
             huffman_matched_labels.clear();
             huffman_code_rows.clear();
@@ -1080,12 +1107,12 @@ void ImageGUI::startTask3HuffmanSort()
 
         QSpinBox minSpin;
         minSpin.setRange(minArea, maxArea);
-        minSpin.setValue(minArea);
+        minSpin.setValue(max(minArea, min(maxArea, huffman_last_low)));
         form.addRow("最小面积:", &minSpin);
 
         QSpinBox maxSpin;
         maxSpin.setRange(minArea, maxArea);
-        maxSpin.setValue(maxArea);
+        maxSpin.setValue(max(minArea, min(maxArea, huffman_last_high)));
         form.addRow("最大面积:", &maxSpin);
 
         QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
@@ -1110,6 +1137,8 @@ void ImageGUI::startTask3HuffmanSort()
         if (low > high) {
             swap(low, high);
         }
+        huffman_last_low = low;
+        huffman_last_high = high;
 
         const pair<int, int> range = findAreaRange(allAreas, low, high);
         if (range.first < 0) {
@@ -1128,6 +1157,10 @@ void ImageGUI::startTask3HuffmanSort()
         for (int i = range.first; i <= range.second; ++i) {
             selected.push_back(allAreas[i]);
         }
+
+        huffman_selected_area_label = -1;
+        huffman_selected_tree_node_index = -1;
+        huffman_markers = markers.clone();
 
         huffman_matched_labels.clear();
         for (const auto &r : selected) {
@@ -1205,7 +1238,14 @@ void ImageGUI::startTask3HuffmanSort()
         const int widthCanvas = max(1200, leaves * 80);
         const int heightCanvas = max(600, (maxDepth + 2) * 120);
         Mat treeCanvas(heightCanvas, widthCanvas, CV_8UC3, Scalar(245, 245, 245));
-        drawHuffmanTree(root, treeCanvas, widthCanvas / 2, 60, widthCanvas / 4, 100);
+        huffman_tree_node_centers.clear();
+        drawHuffmanTree(root,
+                treeCanvas,
+                widthCanvas / 2,
+                60,
+                widthCanvas / 4,
+                100,
+                &huffman_tree_node_centers);
         putText(treeCanvas,
                 "Huffman Tree",
                 Point(20, 34),
@@ -1393,7 +1433,7 @@ void ImageGUI::updateHuffmanTable(const vector<pair<int, int>> &allLabelAreas,
     huffman_table->clearContents();
     huffman_table->setRowCount(static_cast<int>(allLabelAreas.size()));
 
-    const QColor hitBg(255, 245, 190);
+    const QColor hitBg(255, 252, 232);
     const QColor hitText(80, 50, 0);
 
     for (int i = 0; i < static_cast<int>(allLabelAreas.size()); ++i) {
@@ -1456,29 +1496,77 @@ void ImageGUI::updateHuffmanCodeTable(const vector<tuple<int, int, string>> &cod
 
 void ImageGUI::refreshHuffmanView()
 {
-    if (!huffman_prev_button || !huffman_next_button || !huffman_view_title_label || !huffman_label) {
+    if (!huffman_area_button || !huffman_tree_button || !huffman_view_title_label || !huffman_label) {
         return;
     }
 
     const bool hasImages = !huffman_highlight_image.empty() && !huffman_tree_image.empty();
-    huffman_prev_button->setEnabled(hasImages);
-    huffman_next_button->setEnabled(hasImages);
+    huffman_area_button->setEnabled(hasImages);
+    huffman_tree_button->setEnabled(hasImages);
+
+    auto applyButtonStyle = [](QPushButton *btn, bool active) {
+        if (!btn) {
+            return;
+        }
+        if (active) {
+            btn->setStyleSheet(
+                "QPushButton {"
+                "  background-color: #1565c0;"
+                "  color: white;"
+                "  border: none;"
+                "  padding: 6px 14px;"
+                "  border-radius: 4px;"
+                "  font-weight: bold;"
+                "}");
+        } else {
+            btn->setStyleSheet(
+                "QPushButton {"
+                "  background-color: #eceff1;"
+                "  color: #37474f;"
+                "  border: 1px solid #cfd8dc;"
+                "  padding: 6px 14px;"
+                "  border-radius: 4px;"
+                "}");
+        }
+    };
 
     if (!hasImages) {
+        huffman_view_index = 0;
+        huffman_area_button->setChecked(true);
+        huffman_tree_button->setChecked(false);
+        applyButtonStyle(huffman_area_button, true);
+        applyButtonStyle(huffman_tree_button, false);
         huffman_view_title_label->setText("高亮区域");
         huffman_label->clear();
         syncSidebarByTab(3);
         return;
     }
 
+    huffman_view_index = (huffman_view_index == 1) ? 1 : 0;
+    huffman_area_button->setChecked(huffman_view_index == 0);
+    huffman_tree_button->setChecked(huffman_view_index == 1);
+    applyButtonStyle(huffman_area_button, huffman_view_index == 0);
+    applyButtonStyle(huffman_tree_button, huffman_view_index == 1);
+
     if (huffman_view_index == 0) {
+        Mat shown = huffman_highlight_image.clone();
+        if (huffman_selected_area_label > 0 && !huffman_markers.empty()) {
+            shown = brightenRegionByLabel(shown, huffman_markers, huffman_selected_area_label);
+        }
         huffman_view_title_label->setText("高亮区域");
-        displayImage(huffman_highlight_image, huffman_label);
-        result_image = huffman_highlight_image;
+        displayImage(shown, huffman_label);
+        result_image = shown;
     } else {
+        Mat shown = huffman_tree_image.clone();
+        if (huffman_selected_tree_node_index >= 0 &&
+            huffman_selected_tree_node_index < static_cast<int>(huffman_tree_node_centers.size())) {
+            const Point center = huffman_tree_node_centers[huffman_selected_tree_node_index];
+            circle(shown, center, 24, Scalar(60, 200, 255), 2, LINE_AA);
+            circle(shown, center, 17, Scalar(60, 200, 255), 2, LINE_AA);
+        }
         huffman_view_title_label->setText("Huffman树");
-        displayImage(huffman_tree_image, huffman_label);
-        result_image = huffman_tree_image;
+        displayImage(shown, huffman_label);
+        result_image = shown;
     }
 
     syncSidebarByTab(3);
@@ -1586,22 +1674,90 @@ void ImageGUI::onViewModeChanged(int index)
     tab_widget->setCurrentIndex(index);
 }
 
-void ImageGUI::onHuffmanPrevView()
+void ImageGUI::onHuffmanAreaViewClicked()
 {
     if (huffman_highlight_image.empty() || huffman_tree_image.empty()) {
         return;
     }
-    huffman_view_index = (huffman_view_index == 0) ? 1 : 0;
+    huffman_view_index = 0;
     refreshHuffmanView();
 }
 
-void ImageGUI::onHuffmanNextView()
+void ImageGUI::onHuffmanTreeViewClicked()
 {
     if (huffman_highlight_image.empty() || huffman_tree_image.empty()) {
         return;
     }
-    huffman_view_index = (huffman_view_index == 0) ? 1 : 0;
+    huffman_view_index = 1;
     refreshHuffmanView();
+}
+
+void ImageGUI::onHuffmanAreaTableCellClicked(int row, int column)
+{
+    (void)column;
+
+    if (row < 0 || row >= static_cast<int>(huffman_all_label_areas.size())) {
+        return;
+    }
+
+    huffman_selected_area_label = huffman_all_label_areas[row].first;
+    huffman_view_index = 0;
+    tab_widget->setCurrentIndex(3);
+    refreshHuffmanView();
+}
+
+bool ImageGUI::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == huffman_label && event->type() == QEvent::MouseButtonPress) {
+        if (huffman_view_index != 1 || huffman_tree_image.empty() || huffman_tree_node_centers.empty()) {
+            return false;
+        }
+
+        const QPixmap pix = huffman_label->pixmap(Qt::ReturnByValue);
+        if (pix.isNull()) {
+            return false;
+        }
+
+        auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        const QSize pixSize = pix.size();
+        const QSize labelSize = huffman_label->size();
+        const int offsetX = max(0, (labelSize.width() - pixSize.width()) / 2);
+        const int offsetY = max(0, (labelSize.height() - pixSize.height()) / 2);
+
+        const QPoint clickPos = mouseEvent->pos();
+        const int px = clickPos.x() - offsetX;
+        const int py = clickPos.y() - offsetY;
+        if (px < 0 || py < 0 || px >= pixSize.width() || py >= pixSize.height()) {
+            return false;
+        }
+
+        const double sx = static_cast<double>(huffman_tree_image.cols) / static_cast<double>(pixSize.width());
+        const double sy = static_cast<double>(huffman_tree_image.rows) / static_cast<double>(pixSize.height());
+        const Point mappedPoint(cvRound(px * sx), cvRound(py * sy));
+
+        int hitIndex = -1;
+        double bestDist2 = 1e18;
+        const double hitRadius = 22.0;
+        const double hitRadius2 = hitRadius * hitRadius;
+        for (int i = 0; i < static_cast<int>(huffman_tree_node_centers.size()); ++i) {
+            const Point c = huffman_tree_node_centers[i];
+            const double dx = static_cast<double>(mappedPoint.x - c.x);
+            const double dy = static_cast<double>(mappedPoint.y - c.y);
+            const double dist2 = dx * dx + dy * dy;
+            if (dist2 <= hitRadius2 && dist2 < bestDist2) {
+                bestDist2 = dist2;
+                hitIndex = i;
+            }
+        }
+
+        if (hitIndex >= 0) {
+            huffman_selected_tree_node_index = hitIndex;
+            refreshHuffmanView();
+            return true;
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void ImageGUI::syncSidebarByTab(int index)
