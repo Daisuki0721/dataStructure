@@ -258,11 +258,20 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
         int color = -1;
         uint8_t tried = 0;
         std::vector<std::pair<int, uint8_t>> changed;
+        std::vector<std::pair<int, int>> forcedAssignments;
     };
 
     std::vector<Frame> stack(n);
 
     auto chooseNextNode = [&]() {
+        bool hasHighDegreeCandidate = false;
+        for (int i = 0; i < n; ++i) {
+            if (nodeColors[i] == -1 && degree[i] > 3) {
+                hasHighDegreeCandidate = true;
+                break;
+            }
+        }
+
         int best = -1;
         int bestSat = -1;
         int bestDeg = -1;
@@ -270,6 +279,9 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
 
         for (int i = 0; i < n; ++i) {
             if (nodeColors[i] != -1) {
+                continue;
+            }
+            if (hasHighDegreeCandidate && degree[i] <= 3) {
                 continue;
             }
             const int sat = bitCount4(forbidMask[i]);
@@ -295,6 +307,105 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
         return false;
     };
 
+    auto firstColorFromMask = [&](uint8_t mask) {
+        for (int c = 0; c < 4; ++c) {
+            if (mask & static_cast<uint8_t>(1u << c)) {
+                return c;
+            }
+        }
+        return -1;
+    };
+
+    auto rollbackFrameAssignment = [&](Frame& fr) {
+        for (auto it = fr.changed.rbegin(); it != fr.changed.rend(); ++it) {
+            forbidMask[it->first] = it->second;
+        }
+        fr.changed.clear();
+
+        for (auto it = fr.forcedAssignments.rbegin(); it != fr.forcedAssignments.rend(); ++it) {
+            const int node = it->first;
+            const int color = it->second;
+            if (nodeColors[node] != -1 && color >= 0 && color < 4) {
+                nodeColors[node] = -1;
+                colorUsage[color]--;
+            }
+        }
+        fr.forcedAssignments.clear();
+
+        if (fr.node != -1 && fr.color != -1) {
+            nodeColors[fr.node] = -1;
+            colorUsage[fr.color]--;
+        }
+        fr.color = -1;
+    };
+
+    auto propagateForcedAssignments = [&](Frame& fr) {
+        while (true) {
+            int forcedNode = -1;
+            uint8_t forcedMask = 0;
+            int bestSat = -1;
+            int bestDeg = -1;
+            int bestBfs = n + 1;
+
+            for (int i = 0; i < n; ++i) {
+                if (nodeColors[i] != -1) {
+                    continue;
+                }
+
+                const uint8_t avail = static_cast<uint8_t>((~forbidMask[i]) & 0x0F);
+                const int availCount = bitCount4(avail);
+                if (availCount == 0) {
+                    return false;
+                }
+                if (availCount != 1) {
+                    continue;
+                }
+
+                const int sat = bitCount4(forbidMask[i]);
+                if (sat > bestSat ||
+                    (sat == bestSat && degree[i] > bestDeg) ||
+                    (sat == bestSat && degree[i] == bestDeg && bfsRank[i] < bestBfs)) {
+                    forcedNode = i;
+                    forcedMask = avail;
+                    bestSat = sat;
+                    bestDeg = degree[i];
+                    bestBfs = bfsRank[i];
+                }
+            }
+
+            if (forcedNode == -1) {
+                return !hasDeadNode();
+            }
+
+            const int forcedColor = firstColorFromMask(forcedMask);
+            if (forcedColor < 0) {
+                return false;
+            }
+
+            const uint8_t bit = static_cast<uint8_t>(1u << forcedColor);
+            nodeColors[forcedNode] = forcedColor;
+            colorUsage[forcedColor]++;
+            stats.decisions++;
+            fr.forcedAssignments.push_back(std::make_pair(forcedNode, forcedColor));
+
+            for (int nb : adjacency[forcedNode]) {
+                if (nodeColors[nb] != -1) {
+                    continue;
+                }
+                const uint8_t oldMask = forbidMask[nb];
+                const uint8_t newMask = static_cast<uint8_t>(oldMask | bit);
+                if (newMask != oldMask) {
+                    fr.changed.push_back(std::make_pair(nb, oldMask));
+                    forbidMask[nb] = newMask;
+                }
+            }
+
+            if (hasDeadNode()) {
+                return false;
+            }
+        }
+    };
+
     const auto start = std::chrono::steady_clock::now();
 
     int depth = 0;
@@ -318,6 +429,7 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
             f.tried = 0;
             f.color = -1;
             f.changed.clear();
+            f.forcedAssignments.clear();
             if (f.node == -1) {
                 stats.success = validateColoring(adjacency, nodeColors);
                 return stats;
@@ -342,6 +454,7 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
                 stats.decisions++;
 
                 f.changed.clear();
+                f.forcedAssignments.clear();
                 for (int nb : adjacency[f.node]) {
                     if (nodeColors[nb] != -1) {
                         continue;
@@ -354,25 +467,21 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
                     }
                 }
 
-                if (!hasDeadNode()) {
+                const bool propagationOk = !hasDeadNode() && propagateForcedAssignments(f);
+                if (propagationOk) {
                     depth++;
                     if (depth < n) {
                         stack[depth].node = -1;
                         stack[depth].tried = 0;
                         stack[depth].color = -1;
                         stack[depth].changed.clear();
+                        stack[depth].forcedAssignments.clear();
                     }
                     movedForward = true;
                     break;
                 }
 
-                for (auto it = f.changed.rbegin(); it != f.changed.rend(); ++it) {
-                    forbidMask[it->first] = it->second;
-                }
-                f.changed.clear();
-                nodeColors[f.node] = -1;
-                colorUsage[c]--;
-                f.color = -1;
+                rollbackFrameAssignment(f);
             }
         }
 
@@ -384,6 +493,7 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
         f.tried = 0;
         f.color = -1;
         f.changed.clear();
+        f.forcedAssignments.clear();
 
         if (depth == 0) {
             break;
@@ -392,14 +502,7 @@ inline ColoringStats colorWithBfsStackBacktracking(const AdjList& adjacency,
         depth--;
         Frame& parent = stack[depth];
         if (parent.node != -1 && parent.color != -1) {
-            for (auto it = parent.changed.rbegin(); it != parent.changed.rend(); ++it) {
-                forbidMask[it->first] = it->second;
-            }
-            parent.changed.clear();
-
-            nodeColors[parent.node] = -1;
-            colorUsage[parent.color]--;
-            parent.color = -1;
+            rollbackFrameAssignment(parent);
             stats.backtracks++;
         }
     }

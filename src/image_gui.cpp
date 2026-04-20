@@ -19,6 +19,7 @@
 #include <QApplication>
 #include <cstring>
 #include <array>
+#include <random>
 #include <unordered_map>
 #include <opencv2/opencv.hpp>
 #include <chrono>
@@ -543,10 +544,43 @@ void ImageGUI::startTask2Recolor()
         }
 
         vector<int> nodeColors;
-        const fourcolor::ColoringStats cstats =
-            fourcolor::colorWithBfsStackBacktracking(adjacency, bfsOrder, nodeColors, options);
-        if (!cstats.success) {
-            throw runtime_error("四原色回溯着色失败");
+
+        // 失败时快速重试：每轮最多 250ms，总预算 5s。
+        const double totalRetryBudgetMs = 5000.0;
+        const double singleAttemptMs = 250.0;
+        auto retryStart = chrono::steady_clock::now();
+        mt19937 rng(static_cast<unsigned int>(chrono::high_resolution_clock::now().time_since_epoch().count()));
+
+        fourcolor::ColoringStats cstats;
+        bool colored = false;
+        int attempt = 0;
+        while (true) {
+            const double spentMs = chrono::duration<double, milli>(chrono::steady_clock::now() - retryStart).count();
+            if (spentMs > totalRetryBudgetMs) {
+                break;
+            }
+
+            vector<int> attemptOrder = bfsOrder;
+            if (attempt > 0 && !attemptOrder.empty()) {
+                shuffle(attemptOrder.begin(), attemptOrder.end(), rng);
+            }
+
+            fourcolor::ColoringOptions attemptOptions = options;
+            attemptOptions.maxMs = min(options.maxMs, singleAttemptMs);
+
+            cstats = fourcolor::colorWithBfsStackBacktracking(
+                adjacency, attemptOrder, nodeColors, attemptOptions);
+
+            if (cstats.success) {
+                colored = true;
+                break;
+            }
+            ++attempt;
+            status_label->setText(QString("Task2: 着色重试中 (%1)").arg(attempt));
+            qApp->processEvents();
+        }
+        if (!colored) {
+            throw runtime_error("四原色回溯着色失败（5秒内重试仍未成功）");
         }
 
         const array<Vec3b, 4> palette = {

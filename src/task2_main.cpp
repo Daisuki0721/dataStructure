@@ -1,6 +1,7 @@
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -62,10 +63,42 @@ RunResult runTask2(const cv::Mat& src, int k, const std::string& outputPath, boo
         options.maxBacktracks = 120000;
         options.maxMs = 450.0;
     }
-    const fourcolor::ColoringStats cstats =
-        fourcolor::colorWithBfsStackBacktracking(adjacency, bfsOrder, nodeColors, options);
+    // 失败时快速重试：每轮最多 250ms，总预算 5s。
+    const double totalRetryBudgetMs = 5000.0;
+    const double singleAttemptMs = 250.0;
+    auto retryStart = std::chrono::steady_clock::now();
+    std::mt19937 rng(static_cast<unsigned int>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
 
-    r.success = cstats.success;
+    fourcolor::ColoringStats cstats;
+    bool colored = false;
+    int attempt = 0;
+    while (true) {
+        const double spentMs = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - retryStart)
+                                   .count();
+        if (spentMs > totalRetryBudgetMs) {
+            break;
+        }
+
+        std::vector<int> attemptOrder = bfsOrder;
+        if (attempt > 0 && !attemptOrder.empty()) {
+            std::shuffle(attemptOrder.begin(), attemptOrder.end(), rng);
+        }
+
+        fourcolor::ColoringOptions attemptOptions = options;
+        attemptOptions.maxMs = std::min(options.maxMs, singleAttemptMs);
+
+        cstats = fourcolor::colorWithBfsStackBacktracking(
+            adjacency, attemptOrder, nodeColors, attemptOptions);
+
+        if (cstats.success) {
+            colored = true;
+            break;
+        }
+        ++attempt;
+    }
+
+    r.success = colored;
     r.regionCount = static_cast<int>(regionLabels.size());
     r.backtracks = cstats.backtracks;
 
