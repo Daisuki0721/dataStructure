@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QSpinBox>
 #include <QComboBox>
+#include <QPoint>
 #include <opencv2/opencv.hpp>
 #include <QObject>
 #include <set>
@@ -17,6 +18,7 @@
 class QTabWidget;
 class QTableWidget;
 class QStackedWidget;
+class QScrollArea;
 
 class ImageGUI : public QMainWindow
 {
@@ -37,6 +39,8 @@ private slots:
     void onViewModeChanged(int index);
     void onSeedTableCellClicked(int row, int column);
     void onInfoTableCellClicked(int row, int column);
+    void onZoomPercentChanged(int value);
+    void onFitLockToggled();
     void onHuffmanAreaViewClicked();
     void onHuffmanTreeViewClicked();
     void onHuffmanAreaTableCellClicked(int row, int column);
@@ -59,7 +63,10 @@ private:
     void updateHuffmanTable(const std::vector<std::pair<int, int>> &allLabelAreas,
                             const std::set<int> &matchedLabels);
     void updateHuffmanCodeTable(const std::vector<std::tuple<int, int, std::string>> &codeRows);
+    void refreshCurrentView();
     void refreshHuffmanView();
+    QScrollArea *scrollAreaForLabel(const QLabel *label) const;
+    bool handleHuffmanTreeNodeHit(const QPoint &labelPos);
     void syncSidebarByTab(int index);
 
     QLabel *original_label;
@@ -74,12 +81,18 @@ private:
     QPushButton *segment_button;
     QPushButton *task2_button;
     QPushButton *task3_button;
+    QPushButton *fit_lock_button;
     QPushButton *huffman_area_button;
     QPushButton *huffman_tree_button;
     QPushButton *save_button;
     QSpinBox *k_spinbox;
+    QSpinBox *zoom_spinbox;
     QComboBox *view_mode_combo;
     QTabWidget *tab_widget;
+    QScrollArea *original_scroll_area;
+    QScrollArea *result_scroll_area;
+    QScrollArea *coloring_scroll_area;
+    QScrollArea *huffman_scroll_area;
     QWidget *sidebar_widget;
     QStackedWidget *sidebar_stack;
     QTableWidget *seed_table;
@@ -107,8 +120,16 @@ private:
     int huffman_selected_tree_node_index;
     int huffman_last_low;
     int huffman_last_high;
+    int zoom_percent;
+    bool fit_lock_enabled;
+    bool drag_panning_active;
+    bool drag_panning_moved;
+    QPoint drag_last_pos;
+    QScrollArea *drag_scroll_area;
+    QLabel *drag_label;
     std::vector<cv::Point> huffman_tree_node_centers;
     std::vector<int> huffman_tree_node_labels;
+    std::unordered_map<int, int> huffman_code_row_by_label;
     std::vector<std::pair<int, int>> huffman_all_label_areas;
     std::set<int> huffman_matched_labels;
     std::vector<std::tuple<int, int, std::string>> huffman_code_rows;

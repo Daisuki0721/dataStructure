@@ -22,6 +22,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QScrollBar>
 #include <cstring>
 #include <array>
 #include <map>
@@ -154,6 +155,35 @@ void putCenteredText(Mat &image,
     putText(image, text, org, FONT_HERSHEY_SIMPLEX, fontScale, color, thickness, LINE_AA);
 }
 
+Mat paintRegionWithColor(const Mat &baseImage,
+                        const Mat &markers,
+                        int targetLabel,
+                        const Vec3b &fillColor)
+{
+    Mat output = baseImage.clone();
+    if (output.empty() || markers.empty() || targetLabel <= 0) {
+        return output;
+    }
+
+    for (int y = 0; y < markers.rows; ++y) {
+        const int *row = markers.ptr<int>(y);
+        for (int x = 0; x < markers.cols; ++x) {
+            if (row[x] == targetLabel) {
+                Vec3b &px = output.at<Vec3b>(y, x);
+                // 选中态提高黄色成分，但仍避免纯黄硬覆盖。
+                for (int c = 0; c < 3; ++c) {
+                    px[c] = saturate_cast<uchar>(px[c] * 0.60 + fillColor[c] * 0.40);
+                }
+                // 再非常轻微提白，保持亮度但不冲淡黄色。
+                for (int c = 0; c < 3; ++c) {
+                    px[c] = saturate_cast<uchar>(px[c] * 0.90 + 255.0 * 0.10);
+                }
+            }
+        }
+    }
+    return output;
+}
+
 struct QueueNode {
     GuiHuffmanNode *node = nullptr;
     int minLeafLabel = -1;
@@ -258,9 +288,10 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
     const Scalar edgeColor(90, 90, 90);
     const Scalar nodeColor(255, 255, 255);
     const Scalar textColor(30, 30, 30);
+    const int margin = 20;
 
     if (root->left) {
-        const int childX = x - xOffset;
+        const int childX = max(margin, min(canvas.cols - margin, x - xOffset));
         const int childY = y + levelHeight;
         line(canvas, Point(x, y), Point(childX, childY), edgeColor, 1, LINE_AA);
         putText(canvas, "0", Point((x + childX) / 2 - 8, (y + childY) / 2),
@@ -269,13 +300,13 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
                         canvas,
                         childX,
                         childY,
-                        max(24, xOffset / 2),
+                        max(8, xOffset / 2),
                         levelHeight,
                         nodeCenters,
                         nodeLabels);
     }
     if (root->right) {
-        const int childX = x + xOffset;
+        const int childX = max(margin, min(canvas.cols - margin, x + xOffset));
         const int childY = y + levelHeight;
         line(canvas, Point(x, y), Point(childX, childY), edgeColor, 1, LINE_AA);
         putText(canvas, "1", Point((x + childX) / 2 + 2, (y + childY) / 2),
@@ -284,7 +315,7 @@ void drawHuffmanTree(const GuiHuffmanNode *root,
                         canvas,
                         childX,
                         childY,
-                        max(24, xOffset / 2),
+                        max(8, xOffset / 2),
                         levelHeight,
                         nodeCenters,
                         nodeLabels);
@@ -320,15 +351,21 @@ void destroyHuffmanTree(GuiHuffmanNode *root)
 
 ImageGUI::ImageGUI(QWidget *parent)
     : QMainWindow(parent), original_image(), result_image(), k_value(25), tab_widget(nullptr),
+      original_scroll_area(nullptr), result_scroll_area(nullptr),
+      coloring_scroll_area(nullptr), huffman_scroll_area(nullptr),
       sidebar_widget(nullptr), sidebar_stack(nullptr), seed_table(nullptr), info_table(nullptr),
       huffman_table(nullptr), huffman_code_table(nullptr), huffman_view_index(0),
       huffman_selected_area_label(-1), huffman_selected_tree_node_index(-1),
       huffman_last_low(25), huffman_last_high(1000),
+      zoom_percent(100), fit_lock_enabled(true),
+    drag_panning_active(false), drag_panning_moved(false),
+    drag_scroll_area(nullptr), drag_label(nullptr),
       original_label(nullptr), result_label(nullptr), coloring_label(nullptr), huffman_label(nullptr),
       huffman_view_title_label(nullptr), sidebar_title_label(nullptr), file_label(nullptr),
       status_label(nullptr), file_button(nullptr), segment_button(nullptr), task2_button(nullptr),
-      task3_button(nullptr), huffman_area_button(nullptr), huffman_tree_button(nullptr),
-      save_button(nullptr), k_spinbox(nullptr), view_mode_combo(nullptr)
+      task3_button(nullptr), fit_lock_button(nullptr), huffman_area_button(nullptr),
+      huffman_tree_button(nullptr), save_button(nullptr), k_spinbox(nullptr),
+      zoom_spinbox(nullptr), view_mode_combo(nullptr)
 {
     initUI();
 }
@@ -364,10 +401,11 @@ void ImageGUI::initUI()
     original_label->setMinimumWidth(600);
     original_label->setAlignment(Qt::AlignCenter);
     original_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    QScrollArea *original_scroll = new QScrollArea();
-    original_scroll->setWidget(original_label);
-        original_scroll->setWidgetResizable(true);
-    tab_widget->addTab(original_scroll, "原始图像");
+    original_scroll_area = new QScrollArea();
+    original_scroll_area->setWidget(original_label);
+    original_scroll_area->setWidgetResizable(false);
+    original_scroll_area->setAlignment(Qt::AlignCenter);
+    tab_widget->addTab(original_scroll_area, "原始图像");
 
     // 分割结果
     result_label = new QLabel();
@@ -376,10 +414,11 @@ void ImageGUI::initUI()
     result_label->setMinimumWidth(600);
     result_label->setAlignment(Qt::AlignCenter);
     result_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    QScrollArea *result_scroll = new QScrollArea();
-    result_scroll->setWidget(result_label);
-        result_scroll->setWidgetResizable(true);
-    tab_widget->addTab(result_scroll, "分割结果");
+    result_scroll_area = new QScrollArea();
+    result_scroll_area->setWidget(result_label);
+    result_scroll_area->setWidgetResizable(false);
+    result_scroll_area->setAlignment(Qt::AlignCenter);
+    tab_widget->addTab(result_scroll_area, "分割结果");
 
     // Task2 着色结果
     coloring_label = new QLabel();
@@ -388,10 +427,11 @@ void ImageGUI::initUI()
     coloring_label->setMinimumWidth(600);
     coloring_label->setAlignment(Qt::AlignCenter);
     coloring_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    QScrollArea *coloring_scroll = new QScrollArea();
-    coloring_scroll->setWidget(coloring_label);
-    coloring_scroll->setWidgetResizable(true);
-    tab_widget->addTab(coloring_scroll, "着色结果");
+    coloring_scroll_area = new QScrollArea();
+    coloring_scroll_area->setWidget(coloring_label);
+    coloring_scroll_area->setWidgetResizable(false);
+    coloring_scroll_area->setAlignment(Qt::AlignCenter);
+    tab_widget->addTab(coloring_scroll_area, "着色结果");
 
     // Task3 Huffman结果页：顶部按钮切换“面积区域”与“Huffman树”。
     QWidget *huffman_page = new QWidget();
@@ -424,10 +464,14 @@ void ImageGUI::initUI()
     huffman_label->setMinimumWidth(600);
     huffman_label->setAlignment(Qt::AlignCenter);
     huffman_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    QScrollArea *huffman_scroll = new QScrollArea();
-    huffman_scroll->setWidget(huffman_label);
-    huffman_scroll->setWidgetResizable(true);
-    huffman_layout->addWidget(huffman_scroll, 1);
+    huffman_scroll_area = new QScrollArea();
+    huffman_scroll_area->setWidget(huffman_label);
+    huffman_scroll_area->setWidgetResizable(false);
+    huffman_scroll_area->setAlignment(Qt::AlignCenter);
+    huffman_layout->addWidget(huffman_scroll_area, 1);
+    original_label->installEventFilter(this);
+    result_label->installEventFilter(this);
+    coloring_label->installEventFilter(this);
     huffman_label->installEventFilter(this);
 
     tab_widget->addTab(huffman_page, "Huffman排序");
@@ -567,6 +611,26 @@ QWidget *ImageGUI::createControlPanel()
         layout->addWidget(view_mode_combo);
 
         layout->addSpacing(20);
+
+    // 图像缩放控制
+    layout->addWidget(new QLabel("缩放(%):"));
+    zoom_spinbox = new QSpinBox();
+    zoom_spinbox->setMinimum(25);
+    zoom_spinbox->setMaximum(300);
+    zoom_spinbox->setSingleStep(5);
+    zoom_spinbox->setValue(100);
+    zoom_spinbox->setEnabled(false);
+    connect(zoom_spinbox, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &ImageGUI::onZoomPercentChanged);
+    layout->addWidget(zoom_spinbox);
+
+    fit_lock_button = new QPushButton("锁定适配");
+    fit_lock_button->setCheckable(true);
+    fit_lock_button->setChecked(true);
+    connect(fit_lock_button, &QPushButton::clicked, this, &ImageGUI::onFitLockToggled);
+    layout->addWidget(fit_lock_button);
+
+    layout->addSpacing(20);
 
     // K值输入
     layout->addWidget(new QLabel("K值 (种子数):"));
@@ -709,6 +773,7 @@ void ImageGUI::selectImage()
             huffman_all_label_areas.clear();
             huffman_matched_labels.clear();
             huffman_code_rows.clear();
+            huffman_code_row_by_label.clear();
             refreshHuffmanView();
             string status = "已加载图像: " + to_string(original_image.cols) + "x" +
                           to_string(original_image.rows);
@@ -723,6 +788,66 @@ void ImageGUI::selectImage()
 void ImageGUI::onKValueChanged(int value)
 {
     k_value = value;
+}
+
+void ImageGUI::onZoomPercentChanged(int value)
+{
+    zoom_percent = value;
+
+    if (fit_lock_enabled) {
+        fit_lock_enabled = false;
+        if (fit_lock_button) {
+            fit_lock_button->blockSignals(true);
+            fit_lock_button->setChecked(false);
+            fit_lock_button->blockSignals(false);
+        }
+        if (zoom_spinbox) {
+            zoom_spinbox->setEnabled(true);
+        }
+    }
+
+    refreshCurrentView();
+}
+
+void ImageGUI::onFitLockToggled()
+{
+    fit_lock_enabled = fit_lock_button && fit_lock_button->isChecked();
+    if (zoom_spinbox) {
+        zoom_spinbox->setEnabled(!fit_lock_enabled);
+    }
+    refreshCurrentView();
+}
+
+void ImageGUI::refreshCurrentView()
+{
+    if (!tab_widget) {
+        return;
+    }
+
+    const int index = tab_widget->currentIndex();
+    if (index == 0) {
+        if (!original_image.empty()) {
+            displayImage(original_image, original_label);
+        }
+    } else if (index == 1) {
+        if (!task1_display_image.empty()) {
+            displayImage(task1_display_image, result_label);
+            result_image = task1_display_image;
+        } else if (!task1_cached_image.empty()) {
+            displayImage(task1_cached_image, result_label);
+            result_image = task1_cached_image;
+        }
+    } else if (index == 2) {
+        if (!task2_display_image.empty()) {
+            displayImage(task2_display_image, coloring_label);
+            result_image = task2_display_image;
+        } else if (!task2_base_image.empty()) {
+            displayImage(task2_base_image, coloring_label);
+            result_image = task2_base_image;
+        }
+    } else if (index == 3) {
+        refreshHuffmanView();
+    }
 }
 
 void ImageGUI::startSegmentation()
@@ -1179,38 +1304,39 @@ void ImageGUI::startTask3HuffmanSort()
             huffman_matched_labels.insert(r.label);
         }
 
-        unordered_map<int, Vec3b> colorByLabel;
-        mt19937 rng(static_cast<unsigned int>(chrono::high_resolution_clock::now().time_since_epoch().count()));
-        uniform_int_distribution<int> ch(80, 255);
-        for (const auto &r : selected) {
-            colorByLabel[r.label] = Vec3b(static_cast<uchar>(ch(rng)),
-                                          static_cast<uchar>(ch(rng)),
-                                          static_cast<uchar>(ch(rng)));
-        }
+        Mat highlightedSelectedBase = original_image.clone();
 
-        Mat highlightMask = Mat::zeros(original_image.size(), CV_8UC3);
+        // 命中区域提白更明显一些。
         for (int y = 0; y < markers.rows; ++y) {
             for (int x = 0; x < markers.cols; ++x) {
                 const int label = markers.at<int>(y, x);
-                if (label == -1) {
-                    highlightMask.at<Vec3b>(y, x) = Vec3b(255, 255, 255);
-                } else if (huffman_matched_labels.find(label) != huffman_matched_labels.end()) {
-                    highlightMask.at<Vec3b>(y, x) = colorByLabel[label];
+                if (huffman_matched_labels.find(label) != huffman_matched_labels.end()) {
+                    Vec3b &px = highlightedSelectedBase.at<Vec3b>(y, x);
+                    for (int c = 0; c < 3; ++c) {
+                        px[c] = saturate_cast<uchar>(px[c] * 0.65 + 255.0 * 0.35);
+                    }
                 }
             }
         }
 
-        Mat highlighted;
-        addWeighted(original_image, 0.45, highlightMask, 0.55, 0.0, highlighted);
+        // 分水岭边界线统一白色。
+        for (int y = 0; y < markers.rows; ++y) {
+            for (int x = 0; x < markers.cols; ++x) {
+                if (markers.at<int>(y, x) == -1) {
+                    highlightedSelectedBase.at<Vec3b>(y, x) = Vec3b(255, 255, 255);
+                }
+            }
+        }
 
-        const auto centroids = computeRegionCentroids(markers, selected);
-        for (const auto &r : selected) {
+        // 按要求：所有区域都标注面积。
+        const auto centroids = computeRegionCentroids(markers, allAreas);
+        for (const auto &r : allAreas) {
             auto it = centroids.find(r.label);
             if (it != centroids.end()) {
-                putCenteredText(highlighted,
+                putCenteredText(highlightedSelectedBase,
                                 to_string(r.area),
                                 it->second,
-                                0.48,
+                                0.43,
                                 Scalar(255, 255, 255),
                                 1);
             }
@@ -1226,6 +1352,7 @@ void ImageGUI::startTask3HuffmanSort()
         generateHuffmanCodes(root, "", codes, 0, maxDepth);
 
         huffman_code_rows.clear();
+        huffman_code_row_by_label.clear();
         huffman_code_rows.reserve(selected.size());
         for (const auto &r : selected) {
             const auto it = codes.find(r.label);
@@ -1247,17 +1374,17 @@ void ImageGUI::startTask3HuffmanSort()
              });
 
         const int leaves = max(2, countHuffmanLeaves(root));
-        const int widthCanvas = max(1200, leaves * 80);
-        const int heightCanvas = max(600, (maxDepth + 2) * 120);
+        const int widthCanvas = max(1500, leaves * 96);
+        const int heightCanvas = max(680, (maxDepth + 3) * 110);
         Mat treeCanvas(heightCanvas, widthCanvas, CV_8UC3, Scalar(245, 245, 245));
         huffman_tree_node_centers.clear();
         huffman_tree_node_labels.clear();
         drawHuffmanTree(root,
                 treeCanvas,
                 widthCanvas / 2,
-                60,
-                widthCanvas / 4,
-                100,
+            72,
+            max(100, widthCanvas / 5),
+            100,
             &huffman_tree_node_centers,
             &huffman_tree_node_labels);
         putText(treeCanvas,
@@ -1269,7 +1396,7 @@ void ImageGUI::startTask3HuffmanSort()
                 2,
                 LINE_AA);
 
-        huffman_highlight_image = highlighted;
+        huffman_highlight_image = highlightedSelectedBase;
         huffman_tree_image = treeCanvas;
         huffman_view_index = 0;
 
@@ -1314,14 +1441,42 @@ void ImageGUI::displayImage(const Mat &cv_img, QLabel *label)
 {
     Mat display_img = cv_img.clone();
 
-    // 自动调整大小
-    int height = display_img.rows;
-    int width = display_img.cols;
-    if (width > 800 || height > 500) {
-        double scale = min(800.0 / width, 500.0 / height);
-        int new_width = static_cast<int>(width * scale);
-        int new_height = static_cast<int>(height * scale);
-        cv::resize(display_img, display_img, Size(new_width, new_height));
+    if (display_img.empty() || !label) {
+        return;
+    }
+
+    const int imgW = display_img.cols;
+    const int imgH = display_img.rows;
+
+    QScrollArea *targetScroll = nullptr;
+    if (label == original_label) {
+        targetScroll = original_scroll_area;
+    } else if (label == result_label) {
+        targetScroll = result_scroll_area;
+    } else if (label == coloring_label) {
+        targetScroll = coloring_scroll_area;
+    } else if (label == huffman_label) {
+        targetScroll = huffman_scroll_area;
+    }
+
+    double scale = 1.0;
+    if (fit_lock_enabled && targetScroll && targetScroll->viewport()) {
+        const int viewW = max(1, targetScroll->viewport()->width() - 8);
+        const int viewH = max(1, targetScroll->viewport()->height() - 8);
+        const double sx = static_cast<double>(viewW) / static_cast<double>(imgW);
+        const double sy = static_cast<double>(viewH) / static_cast<double>(imgH);
+        scale = min(sx, sy);
+        if (scale <= 0.0) {
+            scale = 1.0;
+        }
+    } else {
+        scale = static_cast<double>(max(25, zoom_percent)) / 100.0;
+    }
+
+    if (scale < 0.999 || scale > 1.001) {
+        const int newW = max(1, static_cast<int>(imgW * scale));
+        const int newH = max(1, static_cast<int>(imgH * scale));
+        cv::resize(display_img, display_img, Size(newW, newH));
     }
 
     // 转换颜色空间
@@ -1335,7 +1490,18 @@ void ImageGUI::displayImage(const Mat &cv_img, QLabel *label)
                     static_cast<int>(rgb_image.step),
                     QImage::Format_RGB888);
 
-    label->setPixmap(QPixmap::fromImage(qt_image.copy()));
+    const QPixmap pixmap = QPixmap::fromImage(qt_image.copy());
+    label->setPixmap(pixmap);
+    label->setFixedSize(pixmap.size());
+
+    QScrollArea *scrollArea = scrollAreaForLabel(label);
+    if (scrollArea) {
+        const bool canPan = pixmap.width() > scrollArea->viewport()->width() ||
+                            pixmap.height() > scrollArea->viewport()->height();
+        if (!drag_panning_active || drag_label != label) {
+            label->setCursor(canPan ? Qt::OpenHandCursor : Qt::ArrowCursor);
+        }
+    }
 }
 
 void ImageGUI::saveResult()
@@ -1447,8 +1613,7 @@ void ImageGUI::updateHuffmanTable(const vector<pair<int, int>> &allLabelAreas,
     huffman_table->clearContents();
     huffman_table->setRowCount(static_cast<int>(allLabelAreas.size()));
 
-    const QColor hitBg(255, 252, 232);
-    const QColor hitText(80, 50, 0);
+    const QColor hitBg(98, 94, 36);
 
     for (int i = 0; i < static_cast<int>(allLabelAreas.size()); ++i) {
         const int label = allLabelAreas[i].first;
@@ -1465,13 +1630,6 @@ void ImageGUI::updateHuffmanTable(const vector<pair<int, int>> &allLabelAreas,
         if (matchedLabels.find(label) != matchedLabels.end()) {
             labelItem->setBackground(QBrush(hitBg));
             areaItem->setBackground(QBrush(hitBg));
-            labelItem->setForeground(QBrush(hitText));
-            areaItem->setForeground(QBrush(hitText));
-
-            QFont boldFont = labelItem->font();
-            boldFont.setBold(true);
-            labelItem->setFont(boldFont);
-            areaItem->setFont(boldFont);
         }
     }
 
@@ -1484,6 +1642,7 @@ void ImageGUI::updateHuffmanCodeTable(const vector<tuple<int, int, string>> &cod
         return;
     }
 
+    huffman_code_row_by_label.clear();
     huffman_code_table->clearContents();
     huffman_code_table->setRowCount(static_cast<int>(codeRows.size()));
 
@@ -1491,6 +1650,7 @@ void ImageGUI::updateHuffmanCodeTable(const vector<tuple<int, int, string>> &cod
         const int label = get<0>(codeRows[i]);
         const int area = get<1>(codeRows[i]);
         const string &code = get<2>(codeRows[i]);
+        huffman_code_row_by_label[label] = i;
 
         QTableWidgetItem *labelItem = new QTableWidgetItem(QString::number(label));
         labelItem->setTextAlignment(Qt::AlignCenter);
@@ -1565,7 +1725,10 @@ void ImageGUI::refreshHuffmanView()
     if (huffman_view_index == 0) {
         Mat shown = huffman_highlight_image.clone();
         if (huffman_selected_area_label > 0 && !huffman_markers.empty()) {
-            shown = brightenRegionByLabel(shown, huffman_markers, huffman_selected_area_label);
+            shown = paintRegionWithColor(shown,
+                                        huffman_markers,
+                                        huffman_selected_area_label,
+                                        Vec3b(0, 255, 255));
         }
         huffman_view_title_label->setText("高亮区域");
         displayImage(shown, huffman_label);
@@ -1584,6 +1747,92 @@ void ImageGUI::refreshHuffmanView()
     }
 
     syncSidebarByTab(3);
+}
+
+QScrollArea *ImageGUI::scrollAreaForLabel(const QLabel *label) const
+{
+    if (label == original_label) {
+        return original_scroll_area;
+    }
+    if (label == result_label) {
+        return result_scroll_area;
+    }
+    if (label == coloring_label) {
+        return coloring_scroll_area;
+    }
+    if (label == huffman_label) {
+        return huffman_scroll_area;
+    }
+    return nullptr;
+}
+
+bool ImageGUI::handleHuffmanTreeNodeHit(const QPoint &labelPos)
+{
+    if (huffman_view_index != 1 || huffman_tree_image.empty() || huffman_tree_node_centers.empty() || !huffman_label) {
+        return false;
+    }
+
+    const QPixmap pix = huffman_label->pixmap(Qt::ReturnByValue);
+    if (pix.isNull()) {
+        return false;
+    }
+
+    const QSize pixSize = pix.size();
+    const QSize labelSize = huffman_label->size();
+    const int offsetX = max(0, (labelSize.width() - pixSize.width()) / 2);
+    const int offsetY = max(0, (labelSize.height() - pixSize.height()) / 2);
+
+    const int px = labelPos.x() - offsetX;
+    const int py = labelPos.y() - offsetY;
+    if (px < 0 || py < 0 || px >= pixSize.width() || py >= pixSize.height()) {
+        return false;
+    }
+
+    const double sx = static_cast<double>(huffman_tree_image.cols) / static_cast<double>(pixSize.width());
+    const double sy = static_cast<double>(huffman_tree_image.rows) / static_cast<double>(pixSize.height());
+    const Point mappedPoint(cvRound(px * sx), cvRound(py * sy));
+
+    int hitIndex = -1;
+    double bestDist2 = 1e18;
+    const double hitRadius = 22.0;
+    const double hitRadius2 = hitRadius * hitRadius;
+    for (int i = 0; i < static_cast<int>(huffman_tree_node_centers.size()); ++i) {
+        const Point c = huffman_tree_node_centers[i];
+        const double dx = static_cast<double>(mappedPoint.x - c.x);
+        const double dy = static_cast<double>(mappedPoint.y - c.y);
+        const double dist2 = dx * dx + dy * dy;
+        if (dist2 <= hitRadius2 && dist2 < bestDist2) {
+            bestDist2 = dist2;
+            hitIndex = i;
+        }
+    }
+
+    if (hitIndex >= 0) {
+        huffman_selected_tree_node_index = hitIndex;
+
+        if (huffman_code_table) {
+            huffman_code_table->clearSelection();
+
+            const int label = (hitIndex < static_cast<int>(huffman_tree_node_labels.size()))
+                                  ? huffman_tree_node_labels[hitIndex]
+                                  : -1;
+            if (label >= 0) {
+                auto it = huffman_code_row_by_label.find(label);
+                if (it != huffman_code_row_by_label.end()) {
+                    const int row = it->second;
+                    huffman_code_table->selectRow(row);
+                    if (QTableWidgetItem *item = huffman_code_table->item(row, 0)) {
+                        huffman_code_table->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+                    }
+                }
+            }
+        }
+
+        refreshHuffmanView();
+        return true;
+    }
+
+    return false;
 }
 
 Mat ImageGUI::brightenRegionByLabel(const Mat &baseImage,
@@ -1655,26 +1904,7 @@ void ImageGUI::onTabChanged(int index)
     }
 
     syncSidebarByTab(index);
-
-    if (index == 1) {
-        if (!task1_display_image.empty()) {
-            displayImage(task1_display_image, result_label);
-            result_image = task1_display_image;
-        } else if (!task1_cached_image.empty()) {
-            displayImage(task1_cached_image, result_label);
-            result_image = task1_cached_image;
-        }
-    } else if (index == 2) {
-        if (!task2_display_image.empty()) {
-            displayImage(task2_display_image, coloring_label);
-            result_image = task2_display_image;
-        } else if (!task2_base_image.empty()) {
-            displayImage(task2_base_image, coloring_label);
-            result_image = task2_base_image;
-        }
-    } else if (index == 3) {
-        refreshHuffmanView();
-    }
+    refreshCurrentView();
 }
 
 void ImageGUI::onViewModeChanged(int index)
@@ -1749,52 +1979,73 @@ void ImageGUI::onHuffmanCodeTableCellClicked(int row, int column)
 
 bool ImageGUI::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == huffman_label && event->type() == QEvent::MouseButtonPress) {
-        if (huffman_view_index != 1 || huffman_tree_image.empty() || huffman_tree_node_centers.empty()) {
-            return false;
-        }
+    QLabel *label = qobject_cast<QLabel *>(watched);
+    if (label) {
+        QScrollArea *scrollArea = scrollAreaForLabel(label);
+        if (scrollArea && event->type() == QEvent::MouseButtonPress) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                const QPixmap pix = label->pixmap(Qt::ReturnByValue);
+                const bool canPan = !pix.isNull() &&
+                                    (pix.width() > scrollArea->viewport()->width() ||
+                                     pix.height() > scrollArea->viewport()->height());
+                if (canPan) {
+                    drag_panning_active = true;
+                    drag_panning_moved = false;
+                    drag_last_pos = mouseEvent->pos();
+                    drag_scroll_area = scrollArea;
+                    drag_label = label;
+                    label->setCursor(Qt::ClosedHandCursor);
+                    return true;
+                }
 
-        const QPixmap pix = huffman_label->pixmap(Qt::ReturnByValue);
-        if (pix.isNull()) {
-            return false;
-        }
-
-        auto *mouseEvent = static_cast<QMouseEvent *>(event);
-        const QSize pixSize = pix.size();
-        const QSize labelSize = huffman_label->size();
-        const int offsetX = max(0, (labelSize.width() - pixSize.width()) / 2);
-        const int offsetY = max(0, (labelSize.height() - pixSize.height()) / 2);
-
-        const QPoint clickPos = mouseEvent->pos();
-        const int px = clickPos.x() - offsetX;
-        const int py = clickPos.y() - offsetY;
-        if (px < 0 || py < 0 || px >= pixSize.width() || py >= pixSize.height()) {
-            return false;
-        }
-
-        const double sx = static_cast<double>(huffman_tree_image.cols) / static_cast<double>(pixSize.width());
-        const double sy = static_cast<double>(huffman_tree_image.rows) / static_cast<double>(pixSize.height());
-        const Point mappedPoint(cvRound(px * sx), cvRound(py * sy));
-
-        int hitIndex = -1;
-        double bestDist2 = 1e18;
-        const double hitRadius = 22.0;
-        const double hitRadius2 = hitRadius * hitRadius;
-        for (int i = 0; i < static_cast<int>(huffman_tree_node_centers.size()); ++i) {
-            const Point c = huffman_tree_node_centers[i];
-            const double dx = static_cast<double>(mappedPoint.x - c.x);
-            const double dy = static_cast<double>(mappedPoint.y - c.y);
-            const double dist2 = dx * dx + dy * dy;
-            if (dist2 <= hitRadius2 && dist2 < bestDist2) {
-                bestDist2 = dist2;
-                hitIndex = i;
+                if (label == huffman_label) {
+                    return handleHuffmanTreeNodeHit(mouseEvent->pos());
+                }
             }
         }
 
-        if (hitIndex >= 0) {
-            huffman_selected_tree_node_index = hitIndex;
-            refreshHuffmanView();
-            return true;
+        if (scrollArea && event->type() == QEvent::MouseMove) {
+            if (drag_panning_active && drag_label == label && drag_scroll_area == scrollArea) {
+                auto *mouseEvent = static_cast<QMouseEvent *>(event);
+                const QPoint delta = mouseEvent->pos() - drag_last_pos;
+                if (delta.manhattanLength() > 0) {
+                    drag_panning_moved = true;
+                }
+                if (scrollArea->horizontalScrollBar()) {
+                    scrollArea->horizontalScrollBar()->setValue(
+                        scrollArea->horizontalScrollBar()->value() - delta.x());
+                }
+                if (scrollArea->verticalScrollBar()) {
+                    scrollArea->verticalScrollBar()->setValue(
+                        scrollArea->verticalScrollBar()->value() - delta.y());
+                }
+                drag_last_pos = mouseEvent->pos();
+                return true;
+            }
+        }
+
+        if (scrollArea && event->type() == QEvent::MouseButtonRelease) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->button() == Qt::LeftButton && drag_panning_active && drag_label == label) {
+                const bool moved = drag_panning_moved;
+                drag_panning_active = false;
+                drag_panning_moved = false;
+                drag_scroll_area = nullptr;
+                drag_label = nullptr;
+
+                const QPixmap pix = label->pixmap(Qt::ReturnByValue);
+                const bool canPan = !pix.isNull() &&
+                                    (pix.width() > scrollArea->viewport()->width() ||
+                                     pix.height() > scrollArea->viewport()->height());
+                label->setCursor(canPan ? Qt::OpenHandCursor : Qt::ArrowCursor);
+
+                if (!moved && label == huffman_label) {
+                    return handleHuffmanTreeNodeHit(mouseEvent->pos());
+                }
+
+                return moved;
+            }
         }
     }
 
